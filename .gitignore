@@ -1,0 +1,11 @@
+/dist/
+/build/
+/node_modules/
+/keys/
+*.key
+*.pem
+*.token
+.env*
+__pycache__/
+*.pyc
+.DS_Store

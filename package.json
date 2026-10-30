@@ -1,0 +1,13 @@
+{
+  "name": "modelguard",
+  "version": "0.2.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1",
+    "jsdom": "26.1.0"
+  }
+}

@@ -1,0 +1,641 @@
+{
+  "schema": "official-parity-results-v1",
+  "upstream_commit": "a4ef212df06817e8071acd05f00219f4c9eb2f9a",
+  "detector_sha256": "9ac93e5e580f5bac887f97a20bfae15d0a3ad08c6372e4b3552fce6708078a80",
+  "results": [
+    {
+      "id": "gpt-6-astra",
+      "predicted": "gpt-6-astra",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-6-astra",
+          "probability": 0.9999540246028941,
+          "score": 4.022001339831331
+        },
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.00003603217897454484,
+          "score": 1.8989146155770458
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "probability": 0.000004859680775651176,
+          "score": 1.4831728088091554
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "probability": 0.0000013323854304048324,
+          "score": 1.214649286515768
+        },
+        {
+          "model": "deepseek-v4-flash-0731",
+          "probability": 0.000001105586223299257,
+          "score": 1.1759281715259784
+        }
+      ]
+    },
+    {
+      "id": "gpt-6-astra-second",
+      "predicted": "gpt-6-astra",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-6-astra",
+          "probability": 0.9999412756584649,
+          "score": 3.952548645585435
+        },
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.00003231175416821918,
+          "score": 1.806849413734218
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "probability": 0.000017899600830141325,
+          "score": 1.6842807088132745
+        },
+        {
+          "model": "deepseek-v4.1-flash-1017",
+          "probability": 0.000004912845721283686,
+          "score": 1.4159806370420482
+        },
+        {
+          "model": "deepseek-v4.1-flash",
+          "probability": 0.0000011098677210456994,
+          "score": 1.107280190588001
+        }
+      ]
+    },
+    {
+      "id": "gpt-6-sol",
+      "predicted": "gpt-6-sol",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.9999668030257017,
+          "score": 4.074616112945995
+        },
+        {
+          "model": "gpt-6-astra",
+          "probability": 0.00001567029682477431,
+          "score": 1.7787411459373363
+        },
+        {
+          "model": "deepseek-v4.1-flash-1017",
+          "probability": 0.0000062173118235664575,
+          "score": 1.5869090954914926
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "probability": 0.000004098151189610446,
+          "score": 1.5004169034215207
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "probability": 0.000003846373369299133,
+          "score": 1.487259431535226
+        }
+      ]
+    },
+    {
+      "id": "gpt-6-sol-second",
+      "predicted": "gpt-6-sol",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.9999788763039992,
+          "score": 4.176369274264767
+        },
+        {
+          "model": "gpt-6-astra",
+          "probability": 0.0000057431942864554845,
+          "score": 1.672199308173759
+        },
+        {
+          "model": "gpt-5.5",
+          "probability": 0.000005480412696425302,
+          "score": 1.662480359412572
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "probability": 0.000004058399687546029,
+          "score": 1.6001448761165604
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "probability": 0.000003941248579638347,
+          "score": 1.5940665501287918
+        }
+      ]
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "predicted": "gpt-5.6-sol",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-5.6-sol",
+          "probability": 0.9999541259206213,
+          "score": 4.099819646737343
+        },
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.000019619379287594536,
+          "score": 1.8505862554134236
+        },
+        {
+          "model": "gpt-5.5",
+          "probability": 0.000012144703808247496,
+          "score": 1.7510574197199016
+        },
+        {
+          "model": "gpt-6-luna",
+          "probability": 0.000005001704506185268,
+          "score": 1.5669687442267
+        },
+        {
+          "model": "gpt-5.6-terra",
+          "probability": 0.00000396126218100731,
+          "score": 1.5185731454468154
+        }
+      ]
+    },
+    {
+      "id": "gpt-5.6-sol-second",
+      "predicted": "gpt-5.6-sol",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-5.6-sol",
+          "probability": 0.9999890648564252,
+          "score": 4.3319087819746995
+        },
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.000004827601781478099,
+          "score": 1.7916986279886045
+        },
+        {
+          "model": "gpt-5.5",
+          "probability": 0.000003578201726273855,
+          "score": 1.7295503683499598
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "probability": 8.242778737181467e-7,
+          "score": 1.4248973933170004
+        },
+        {
+          "model": "gpt-6-astra",
+          "probability": 5.215009920090832e-7,
+          "score": 1.329898198656146
+        }
+      ]
+    },
+    {
+      "id": "claude-opus-5",
+      "predicted": "claude-opus-5",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "claude-opus-5",
+          "probability": 0.9995991789528912,
+          "score": 4.088333885952407
+        },
+        {
+          "model": "claude-opus-4.8",
+          "probability": 0.0003420231566338504,
+          "score": 2.4323240599674305
+        },
+        {
+          "model": "claude-fable-5",
+          "probability": 0.000040465093811992625,
+          "score": 1.9893981090661104
+        },
+        {
+          "model": "claude-opus-4.7",
+          "probability": 0.000008494787508706365,
+          "score": 1.6654714321794912
+        },
+        {
+          "model": "claude-fable-5.1",
+          "probability": 0.000004606252928632642,
+          "score": 1.5384649630823386
+        }
+      ]
+    },
+    {
+      "id": "claude-opus-5-second",
+      "predicted": "claude-opus-5",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "claude-opus-5",
+          "probability": 0.99986287710174,
+          "score": 4.148249964640625
+        },
+        {
+          "model": "claude-opus-4.8",
+          "probability": 0.00009664212125821712,
+          "score": 2.229915958557369
+        },
+        {
+          "model": "claude-fable-5",
+          "probability": 0.000020963737791164574,
+          "score": 1.912788783321266
+        },
+        {
+          "model": "hy4-preview",
+          "probability": 0.000006667019814667743,
+          "score": 1.6750563238566754
+        },
+        {
+          "model": "claude-opus-4.7",
+          "probability": 0.000006564077912287517,
+          "score": 1.6718272163331322
+        }
+      ]
+    },
+    {
+      "id": "claude-haiku-4.5",
+      "predicted": "claude-haiku-4.5",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "claude-haiku-4.5",
+          "probability": 0.9999999908507474,
+          "score": 5.369048768578974
+        },
+        {
+          "model": "seed-2.1-turbo",
+          "probability": 2.7416407431722513e-9,
+          "score": 1.2779702762990175
+        },
+        {
+          "model": "mimo-v2.5",
+          "probability": 1.5847481060374324e-9,
+          "score": 1.1642253943859622
+        },
+        {
+          "model": "deepseek-v3.2",
+          "probability": 1.0580765427850433e-9,
+          "score": 1.0803953777139053
+        },
+        {
+          "model": "grok-4.5",
+          "probability": 6.835319496299099e-10,
+          "score": 0.9897253330911678
+        }
+      ]
+    },
+    {
+      "id": "claude-haiku-4.5-second",
+      "predicted": "claude-haiku-4.5",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "claude-haiku-4.5",
+          "probability": 0.999999992694675,
+          "score": 5.474947208833855
+        },
+        {
+          "model": "deepseek-v3.2",
+          "probability": 4.235871553303788e-9,
+          "score": 1.4741440680625968
+        },
+        {
+          "model": "grok-4.5",
+          "probability": 7.167122351985653e-10,
+          "score": 1.1054601479819244
+        },
+        {
+          "model": "mimo-v2.5",
+          "probability": 6.786541123313989e-10,
+          "score": 1.0941375972329714
+        },
+        {
+          "model": "deepseek-v4.1-flash",
+          "probability": 3.1705875668410817e-10,
+          "score": 0.9362143509900389
+        }
+      ]
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "predicted": "gemini-3.1-pro-preview",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gemini-3.1-pro-preview",
+          "probability": 0.9999977472500455,
+          "score": 4.635790538523482
+        },
+        {
+          "model": "gemini-3.6-flash",
+          "probability": 9.882841510015828e-7,
+          "score": 1.7664333727178376
+        },
+        {
+          "model": "gemini-2.5-pro",
+          "probability": 3.612577338241985e-7,
+          "score": 1.5575957057381993
+        },
+        {
+          "model": "gemini-3.8-flash",
+          "probability": 2.5032229384466193e-7,
+          "score": 1.4814707693106652
+        },
+        {
+          "model": "gemini-3.5-flash",
+          "probability": 2.440317018893299e-7,
+          "score": 1.4761893051223387
+        }
+      ]
+    },
+    {
+      "id": "gemini-3.1-pro-preview-second",
+      "predicted": "gemini-3.1-pro-preview",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gemini-3.1-pro-preview",
+          "probability": 0.9999991340891003,
+          "score": 4.619671490291001
+        },
+        {
+          "model": "gemini-3.5-flash",
+          "probability": 2.750809676553901e-7,
+          "score": 1.4849233706918787
+        },
+        {
+          "model": "gemini-3.8-flash",
+          "probability": 2.1830832545629124e-7,
+          "score": 1.4369550363937638
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "probability": 1.157438239202773e-7,
+          "score": 1.3052813617522299
+        },
+        {
+          "model": "gemini-3.6-flash",
+          "probability": 6.74310309993944e-8,
+          "score": 1.193166929822031
+        }
+      ]
+    },
+    {
+      "id": "deepseek-v3.2",
+      "predicted": "deepseek-v3.2",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "deepseek-v3.2",
+          "probability": 0.9999993919936521,
+          "score": 4.804726883719624
+        },
+        {
+          "model": "gpt-4o",
+          "probability": 1.8897673122463008e-7,
+          "score": 1.5920693185780155
+        },
+        {
+          "model": "deepseek-v4-flash",
+          "probability": 1.8551173742789574e-7,
+          "score": 1.5882291186370698
+        },
+        {
+          "model": "mimo-v2.5",
+          "probability": 7.893091766307651e-8,
+          "score": 1.4108990239783434
+        },
+        {
+          "model": "qwen3.8-flash",
+          "probability": 5.918243637799144e-8,
+          "score": 1.3511457377136478
+        }
+      ]
+    },
+    {
+      "id": "deepseek-v3.2-second",
+      "predicted": "deepseek-v3.2",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "deepseek-v3.2",
+          "probability": 0.99999817808892,
+          "score": 4.524034263781303
+        },
+        {
+          "model": "kimi-k3.1-pro",
+          "probability": 4.6858568447579805e-7,
+          "score": 1.4998194081169007
+        },
+        {
+          "model": "grok-4.6",
+          "probability": 4.0575455063223246e-7,
+          "score": 1.469943500224021
+        },
+        {
+          "model": "grok-4.5",
+          "probability": 2.2194776167076714e-7,
+          "score": 1.3447489715206855
+        },
+        {
+          "model": "gpt-4o",
+          "probability": 1.5521873298613091e-7,
+          "score": 1.270540560054224
+        }
+      ]
+    },
+    {
+      "id": "incomplete",
+      "predicted": "",
+      "used_outputs": 0,
+      "probability_status": "unavailable",
+      "top5": []
+    },
+    {
+      "id": "model-alias",
+      "predicted": "gpt-6-astra",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-6-astra",
+          "probability": 0.9999540246028941,
+          "score": 4.022001339831331
+        },
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.00003603217897454484,
+          "score": 1.8989146155770458
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "probability": 0.000004859680775651176,
+          "score": 1.4831728088091554
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "probability": 0.0000013323854304048324,
+          "score": 1.214649286515768
+        },
+        {
+          "model": "deepseek-v4-flash-0731",
+          "probability": 0.000001105586223299257,
+          "score": 1.1759281715259784
+        }
+      ]
+    },
+    {
+      "id": "kimi-k3.1-pro",
+      "predicted": "kimi-k3.1-pro",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "kimi-k3.1-pro",
+          "probability": 0.9998653894285544,
+          "score": 4.812388993508737
+        },
+        {
+          "model": "kimi-k3",
+          "probability": 0.00013454878250023858,
+          "score": 2.962723373977516
+        },
+        {
+          "model": "claude-opus-5.5",
+          "probability": 2.5647726391196358e-8,
+          "score": 1.1853186856201807
+        },
+        {
+          "model": "deepseek-v3.2",
+          "probability": 9.661061666606462e-9,
+          "score": 0.9827120894126871
+        },
+        {
+          "model": "grok-4.6",
+          "probability": 4.7777098616308724e-9,
+          "score": 0.8365927091575788
+        }
+      ]
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "predicted": "gemini-3.5-flash-lite",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "probability": 0.9999946562923032,
+          "score": 4.501933473113364
+        },
+        {
+          "model": "gemini-3.8-flash",
+          "probability": 0.000002013184772469099,
+          "score": 1.780223783642779
+        },
+        {
+          "model": "gemini-3.7-flash",
+          "probability": 0.0000014980607886851137,
+          "score": 1.7188937492339933
+        },
+        {
+          "model": "gemini-3.6-flash",
+          "probability": 9.071676254743133e-7,
+          "score": 1.6148048232780017
+        },
+        {
+          "model": "gemini-3.1-pro-preview",
+          "probability": 4.906979779807391e-7,
+          "score": 1.4872877876599662
+        }
+      ]
+    },
+    {
+      "id": "minimax-m3.1-flash",
+      "predicted": "minimax-m3.1-flash",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "minimax-m3.1-flash",
+          "probability": 0.9999999929514098,
+          "score": 5.438585502006562
+        },
+        {
+          "model": "seed-2.1-turbo",
+          "probability": 2.2992930470895828e-9,
+          "score": 1.3109939122418888
+        },
+        {
+          "model": "deepseek-v4.1-flash-1017",
+          "probability": 1.5077135836751723e-9,
+          "score": 1.2234214651693738
+        },
+        {
+          "model": "deepseek-v4-pro",
+          "probability": 8.387834892392949e-10,
+          "score": 1.1017358721110702
+        },
+        {
+          "model": "mimo-v2.6-flash",
+          "probability": 6.439161951524999e-10,
+          "score": 1.0468724805031595
+        }
+      ]
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "predicted": "gpt-6.1-terra",
+      "used_outputs": 3,
+      "probability_status": "reference_calibrated",
+      "top5": [
+        {
+          "model": "gpt-6.1-terra",
+          "probability": 0.9999382988485238,
+          "score": 3.961362248753088
+        },
+        {
+          "model": "gpt-6-astra",
+          "probability": 0.000029806435215877303,
+          "score": 1.7989158522240896
+        },
+        {
+          "model": "gpt-6-sol",
+          "probability": 0.0000137772029061219,
+          "score": 1.638775407348803
+        },
+        {
+          "model": "gpt-5.6-terra",
+          "probability": 0.000006767505822135611,
+          "score": 1.4912572917948221
+        },
+        {
+          "model": "gpt-5.5",
+          "probability": 0.0000041222730719936846,
+          "score": 1.3883868096849206
+        }
+      ]
+    }
+  ]
+}
