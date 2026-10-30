@@ -2,7 +2,7 @@
 
 Sub2API 的账号模型指纹巡检插件。按“连接管理端 → 选择账号 → 确认策略并开始”完成接入，之后在同一工作台查看队列、采样、结果、暂停归属和下一步。
 
-当前工作版本：**0.3.0**。重构说明与验收记录见 [全链路重构记录](docs/REFACTOR_2026-10-30.md)。
+当前工作版本：**0.3.1**。重构说明与验收记录见 [全链路重构记录](docs/REFACTOR_2026-10-30.md)。
 
 **指纹表示参考库内的统计相似度，不是模型身份认证或智力证明。** 超时、拒答、流中断和不完整样本不算指纹不符。
 
@@ -10,22 +10,24 @@ Sub2API 的账号模型指纹巡检插件。按“连接管理端 → 选择账�
 
 ### 1. 安装并启用插件
 
-从 [Releases](https://github.com/cyeinfpro/ModelGuard/releases) 选择已发布的 `.s2plugin` 和 `publisher-public-key.txt`。源码中的工作版本不表示对应版本已签发或上线。
+从 [Releases](https://github.com/cyeinfpro/ModelGuard/releases) 下载 `.s2plugin` 和 `SHA256SUMS`。默认发布无需外部签名私钥，下载后按 SHA256SUMS 核对归档，再使用宿主管理页上传更新。
 
-在 Sub2API 配置中添加可信发布者，按宿主流程重载配置并上传插件：
+首次使用默认安装包时，在 Sub2API 实际配置中启用自建无签名插件，并正常重启宿主加载配置：
 
 ```yaml
 plugins:
-  allow_unsigned: false
-  trusted_publishers:
-    cyeinfpro-account-guard-v1: "publisher-public-key.txt 中的公钥"
+  allow_unsigned: true
 ```
+
+这是宿主级选项，对该宿主的插件安装均生效；上传仍需管理员授权。宿主继续检查清单、文件 SHA-256、路径安全和兼容性，但无签名包不提供发布者身份证明。保持此设置可支持后续更新和从数据库原包恢复。已有 trusted_publishers 可以保留，带签名的包仍须通过原有验签。
+
+更新同一个插件时，先停用，再上传新版并恢复原启用状态及灰度比例；不要卸载或删除插件状态目录。
 
 启用插件后打开配置页。插件进程是否启用，与插件内“定时检测”是否开启，是两个不同状态；关闭定时检测仍可以手动检测。
 
 宿主契约按官方 Sub2API 0.2.19 对齐，兼容声明为 `>=0.2.19 <0.3.0`。插件参与 `openai.oauth.outbound_transport.v1` 绑定，部署时检查现有传输插件。默认状态目录为 `/app/data/sub2api-account-guard`。
 
-为兼容已有安装，内部插件 ID 仍为 `local.sub2api.account-guard`，发布者 ID 和状态目录保持兼容。
+为兼容已有安装，内部插件 ID 仍为 `local.sub2api.account-guard`，状态目录保持兼容。
 
 ### 2. 连接管理端
 
@@ -82,7 +84,7 @@ plugins:
 
 助手在读取前后核对管理员密钥对该账号的权限，再只读获取账号现有地址、Key、模型映射和代理。桥接安装状态与真实请求是否成功分别展示；socket 文件存在不等于已经验证连通。
 
-参见 [本机 API 桥接安装与排障](docs/API-BRIDGE.md)。签名包同时携带该说明和助手脚本。未安装时，OAuth 仍走原生身份接口，API 账号提示所需配置。
+参见 [本机 API 桥接安装与排障](docs/API-BRIDGE.md)。安装包同时携带该说明和助手脚本。未安装时，OAuth 仍走原生身份接口，API 账号提示所需配置。
 
 API 上游需要支持 `/v1/responses` SSE。聚合渠道的隔离对象是该渠道账号，无法单独识别渠道背后的供应商账号。API 账号默认请求 `gpt-6.1-sol`，预期指纹使用 Astra/Sol 类，可自行调整。
 
@@ -102,18 +104,22 @@ make check-package
 
 1. 构建 Linux amd64、Linux arm64 和本机运行文件。
 2. 启动真实插件进程，验证握手、配置、Health、诊断和版本一致性。
-3. 使用一次性测试发布者生成当前版本测试包。
-4. 检查清单 schema、版本、文件内容、签名和所有哈希。
-5. 删除测试包及测试签名种子；不生成正式发布包。
+3. 分别生成默认无签名包和一次性测试发布者的签名包。
+4. 检查两个包的清单 schema、版本、源码内容、所有哈希和真实签名状态，并验证篡改、缺失文件、额外文件、坏签名及无效显式密钥都会失败。
+5. 删除临时测试包及测试签名种子。
 
-生产打包使用仓库外的既有 Ed25519 签名种子：
+直接生成可安装的当前版本包：
 
 ```sh
-make package SIGNING_KEY=/secure/path/publisher.key
+make package
 make verify-package
 ```
 
-仅首次自建发布者需要创建密钥；后续版本必须继续使用同一把密钥。不要覆盖已有发布者，也不要上传私钥、管理密钥、桥接令牌或生产状态文件。
+结果位于 `dist/ModelGuard-<VERSION>.s2plugin` 和 `dist/SHA256SUMS`。没有密钥时不生成 signature.json，也不会自动创建私钥或误用遗留公钥。若确实需要签名，仍可显式使用 `make package SIGNING_KEY=/secure/path/publisher.key`；显式密钥错误会失败，不会静默降级。
+
+推送 `v<VERSION>` 标签后，CI 会执行测试、构建、打包与完整性检查，再自动发布安装包和校验文件。该流程使用仓库内建 GITHUB_TOKEN，不需要额外签名 Secret。发布时核对标签与提交，已存在的同名资产必须内容一致，不会覆盖不同内容或移动旧标签。
+
+不要上传私钥、管理密钥、桥接令牌或生产状态文件。
 
 `VERSION` 决定运行程序的构建版本和默认安装包名。没有生成当前版本正式包时，对应正式归档测试明确跳过；旧包通过验签不代表新代码已经打包。
 

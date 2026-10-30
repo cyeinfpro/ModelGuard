@@ -21,8 +21,9 @@ check-package: build
 	python3 scripts/check-package.py
 
 package: build
-	@test -n "$(SIGNING_KEY)" || (echo 'Set SIGNING_KEY to an external Ed25519 seed file'; exit 1)
-	go run ./cmd/package -key "$(SIGNING_KEY)"
+	go run ./cmd/package $(if $(strip $(SIGNING_KEY)),-key "$(SIGNING_KEY)")
+	$(MAKE) verify-package
+	python3 scripts/release-checksums.py
 
 verify-package:
-	go run ./cmd/verify-package
+	go run ./cmd/verify-package -allow-unsigned

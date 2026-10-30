@@ -22,7 +22,7 @@ import (
 const ID = "local.sub2api.account-guard"
 const Capability = "openai.oauth.outbound_transport.v1"
 
-var Version = "0.3.0"
+var Version = "0.3.1"
 
 type Plugin struct {
 	v1.UnimplementedTransportPluginServer
