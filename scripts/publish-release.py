@@ -70,7 +70,25 @@ def release_assets(root, version):
 def get_release(repository, tag):
     raw = run("gh", "api", f"repos/{repository}/releases/tags/{quote(tag, safe='')}",
               allow_missing=True)
-    return json.loads(raw) if raw is not None else None
+    if raw is not None:
+        return json.loads(raw)
+    # GitHub's by-tag endpoint may omit an existing draft. The authenticated
+    # release list includes drafts; never mistake one for a missing release.
+    # Do not allow a failed list request to become an empty/missing result.
+    raw = run("gh", "api", f"repos/{repository}/releases?per_page=100", "--paginate",
+              "--jq", f".[] | select(.tag_name == {json.dumps(tag)})")
+    decoder = json.JSONDecoder()
+    matches = []
+    remaining = raw.lstrip()
+    while remaining:
+        release, end = decoder.raw_decode(remaining)
+        if not isinstance(release, dict) or release.get("tag_name") != tag:
+            raise ValueError("GitHub returned an unexpected release during draft lookup.")
+        matches.append(release)
+        remaining = remaining[end:].lstrip()
+    if len(matches) > 1:
+        raise ValueError(f"Multiple releases match {tag}; refusing an ambiguous publication.")
+    return matches[0] if matches else None
 
 
 def remote_asset_hash(repository, asset):
