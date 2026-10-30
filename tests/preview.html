@@ -1,3 +1,57 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Account Guard · 界面演示</title><style>body{margin:0;background:#f5f7fa}iframe{border:0;width:100%;height:1550px}.note{font:12px system-ui;padding:9px 24px;background:#e5eee9;color:#426657;text-align:center}</style><div class="note">界面演示 · 以下为模拟数据，未连接生产服务器</div><iframe src="../ui/index.html#bridge_token=preview"></iframe><script>
-const frame=document.querySelector('iframe');const config={concurrency:3,enabled:true,auto_pause:true,auto_recover:true,pause_unavailable:false,admin_url:'http://127.0.0.1:8080',admin_key:'preview-admin',data_dir:'/app/data/sub2api-account-guard',normal_seconds:1800,retry_seconds:120,quarantine_seconds:21600,timeout_seconds:180,daily_requests:2000,targets:[{account_id:101,model:'gpt-6.1-terra',expected:'gpt-6.1-terra',enabled:true},{account_id:102,model:'gpt-6.1-terra',expected:'gpt-6.1-terra',enabled:true},{account_id:103,model:'gpt-6.1-sol',expected:'gpt-6-astra',enabled:true}]};const state={enabled:true,monitoring_state:"running",target_count:3,accounts:Array.from({length:5},(_,i)=>({id:101+i,name:["Codex Pro · 日常使用","Codex Pro · 恢复复核","Codex Pro · 质量观察","Codex Plus · 备用","Codex Pro · 新账号"][i],type:"oauth",status:"active",schedulable:i!==1,supported:true,suggested_model:"gpt-6.1-terra",suggested_expected:"gpt-6.1-terra"})),auto_pause:true,auto_recover:true,models:[{id:'gpt-6.1-terra',display_name:'GPT 6.1 Terra'},{id:'gpt-6-astra',display_name:'GPT 6 Astra / 6.1 Sol'}],detector_version:'2026-10-27 · a4ef212 · 64 models',state:{requests:54,records:{101:{account_id:101,status:'passed',failures:0,unavailable:0,analysis:{predicted:'gpt-6.1-terra'},next_at:'2026-10-30T12:30:00Z'},102:{account_id:102,status:'recovering',hold:true,recovery_passes:1,failures:0,unavailable:0,analysis:{predicted:'gpt-6.1-terra'},next_at:'2026-10-30T12:02:00Z'},103:{account_id:103,status:'suspect',failures:1,unavailable:0,analysis:{predicted:'gpt-5.6-luna'},next_at:'2026-10-30T12:02:00Z'}},events:[{at:'2026-10-30T12:00:00Z',account_id:102,action:'check',reason:'复测通过，等待第二轮确认'},{at:'2026-10-30T11:54:00Z',account_id:101,action:'recovered',reason:'连续两轮复测通过，已自动恢复调度'}]}};window.addEventListener('message',e=>{if(e.source!==frame.contentWindow)return;const m=e.data;if(m.type==='ui.resize'){frame.style.height=Math.max(1500,m.height)+'px';return;}let payload={};if(m.type==='config.load')payload={config};else if(m.type==='config.save'){Object.assign(config,m.config);payload={config};}else if(m.type==='plugin.status')payload={result:{status_json:JSON.stringify(state)}};else if(m.type==='config.test'){if(config.manual_request_id){state.manual_busy=true;state.concurrency=3;state.active_samples=[101,102,103].map((id,i)=>({account_id:id,index:i+1,phase:i===0?"receiving":"output",started_at:new Date().toISOString(),timeout_seconds:180,output_bytes:i*350}));state.state.manual={id:config.manual_request_id,status:'running',total:3,completed:0,current_id:101};setTimeout(()=>{state.manual_busy=false;state.active_samples=[];Object.assign(state.state.manual,{status:'completed',completed:3,current_id:0,finished_at:new Date().toISOString()});},4000);}payload={result:{success:true,message:'演示模式：未发送真实请求',status_json:JSON.stringify(state)}};}else return;frame.contentWindow.postMessage({source:'sub2api-plugin-host',bridge_token:'preview',request_id:m.request_id,ok:true,...payload},'*');});
-</script></html>
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ModelGuard · 交互预览</title><style>
+*{box-sizing:border-box}body{margin:0;background:#edf0f4;color:#222;font:13px -apple-system,system-ui,sans-serif}.preview-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:12px;padding:12px 16px;background:#fff;border-bottom:1px solid #ddd}.preview-bar strong{font-size:12px}.preview-bar label{display:flex;gap:7px;align-items:center}.preview-bar select{font:inherit;padding:8px;border:1px solid #d8dce3;border-radius:8px;min-height:40px}.notice{margin:0;text-align:center;padding:10px 16px;font-size:11px;color:#666;line-height:1.7}.viewport{margin:0 auto 30px;background:#fff;max-width:1200px;transition:max-width .2s}iframe{display:block;border:0;width:100%;height:900px}body[data-size=phone] .viewport{max-width:390px;box-shadow:0 0 0 1px #d8dce3;border-radius:16px;overflow:hidden}@media(prefers-reduced-motion:reduce){.viewport{transition:none}}
+</style></head><body>
+<div class="preview-bar"><strong>ModelGuard 交互预览</strong><label>场景<select id="scenario"><option value="dashboard">日常工作台</option><option value="first">首次接入</option><option value="running">并行检测中</option><option value="error">管理连接失败</option><option value="interrupted">重启后任务中断</option></select></label><label>宽度<select id="size"><option value="desktop">桌面</option><option value="phone">手机 · 390px</option></select></label></div>
+<p class="notice">全部为模拟数据，不连接管理端，也不发送真实模型请求。可以试用连接、勾选账号、编辑设置与发起检测。</p>
+<div class="viewport"><iframe title="ModelGuard 模拟界面" src="../ui/index.html#bridge_token=preview"></iframe></div>
+<script>
+const frame=document.querySelector('iframe');
+const list=[
+{id:101,name:'Codex Pro · 日常使用',type:'oauth',status:'active',schedulable:true,supported:true,suggested_model:'gpt-6.1-terra',suggested_expected:'gpt-6.1-terra'},
+{id:102,name:'Codex Pro · 恢复复核',type:'oauth',status:'active',schedulable:false,supported:true,suggested_model:'gpt-6.1-terra',suggested_expected:'gpt-6.1-terra'},
+{id:103,name:'API 渠道 · 质量观察',type:'apikey',status:'active',schedulable:true,supported:true,suggested_model:'gpt-6.1-sol',suggested_expected:'gpt-6-astra'},
+{id:104,name:'Codex Plus · 备用',type:'oauth',status:'active',schedulable:true,supported:true,suggested_model:'gpt-6.1-terra',suggested_expected:'gpt-6.1-terra'},
+{id:105,name:'团队手动暂停的账号',type:'oauth',status:'active',schedulable:false,supported:true,suggested_model:'gpt-6.1-terra',suggested_expected:'gpt-6.1-terra'}
+];
+let config,state,lastCommand='',finishTimer;
+const time=(minutes=0)=>new Date(Date.now()+minutes*60000).toISOString();
+function reset(kind){
+ clearTimeout(finishTimer);lastCommand='';
+ config={concurrency:3,enabled:true,auto_pause:false,auto_recover:true,admin_url:'http://127.0.0.1:8080',admin_key:'preview-admin',data_dir:'/app/data/sub2api-account-guard',normal_seconds:1800,retry_seconds:120,quarantine_seconds:21600,timeout_seconds:180,daily_requests:2000,targets:list.slice(0,3).map(a=>({account_id:a.id,model:a.suggested_model,expected:a.suggested_expected,enabled:true}))};
+ state={enabled:true,auto_pause:false,auto_recover:true,monitoring_state:'running',target_count:3,accounts:structuredClone(list),concurrency:3,models:[{id:'gpt-6.1-terra',display_name:'GPT 6.1 Terra'},{id:'gpt-6-astra',display_name:'Astra / Sol 类'}],api_bridge_ready:true,api_bridge_state:'installed',api_bridge_message:'桥接安装完整，实际连接由首轮检测验证',detector_version:'64 类参考指纹 · 演示数据',connection:{state:'ready',message:'管理端已连接',account_count:5,checked_at:time()},readiness:{state:'ready',next_action:'选择账号后开始检测'},budget:{used:54,limit:2000},state:{requests:54,records:{101:{account_id:101,status:'passed',analysis:{predicted:'gpt-6.1-terra'},checked_at:time(-5),next_at:time(25),reason:'3 份有效样本通过'},102:{account_id:102,status:'recovering',hold:true,recovery_passes:1,analysis:{predicted:'gpt-6.1-terra'},checked_at:time(-1),next_at:time(1),reason:'第一轮复核通过，等待连续第二轮确认'},103:{account_id:103,status:'unavailable',hold:false,unavailable:1,checked_at:time(-1),next_at:time(1),reason:'上游连接中断，未形成完整样本；保留调度状态'}},events:[{at:time(-1),account_id:103,action:'check',reason:'采样暂未完成，稍后自动重试'},{at:time(-1),account_id:102,action:'check',reason:'第一轮复核通过，等待第二轮确认'},{at:time(-5),account_id:101,action:'check',reason:'本轮检测通过'}]}};
+ if(kind==='first'){Object.assign(config,{enabled:false,auto_pause:false,auto_recover:false,admin_key:'',targets:[]});Object.assign(state,{enabled:false,auto_recover:false,target_count:0,accounts:[],monitoring_state:'waiting_targets',connection:{state:'needs_credentials',next_action:'先填写管理地址和管理员访问密钥'},state:{requests:0,records:{},events:[]}});}
+ if(kind==='error'){config.admin_key='denied';state.monitoring_state='connection_error';state.accounts_error='管理员访问密钥缺少账号读取权限（HTTP 403）';state.connection={state:'error',message:state.accounts_error,next_action:'检查密钥的账号范围和 accounts.read 权限，再保存连接。'};}
+ if(kind==='interrupted'){state.state.manual={id:'preview-interrupted',status:'interrupted',requested_at:time(-4),finished_at:time(-3),total:3,completed:1};}
+ if(kind==='running')beginRun('preview-auto','scheduled');
+ state.targets=structuredClone(config.targets);
+}
+function beginRun(id,kind='manual'){
+ const ids=config.targets.filter(t=>t.enabled).map(t=>t.account_id);
+ state.manual_busy=kind==='manual';state.batch_busy=true;state.batch={kind,status:'running',total:ids.length,completed:0,active_ids:ids.slice(0,3),queued_ids:ids.slice(3),errors:0};
+ state.active_samples=ids.slice(0,3).map((account_id,i)=>({account_id,index:i+1,attempt:1,phase:i===0?'receiving':i===1?'reasoning':'output',started_at:time(),timeout_seconds:180}));
+ if(kind==='manual'){state.state.manual={id,status:'running',requested_at:time(),started_at:time(),total:ids.length,completed:0};state.manual_request={id,accepted:true,state:'queued'};}
+ finishTimer=setTimeout(()=>{state.manual_busy=false;state.batch_busy=false;state.active_samples=[];Object.assign(state.batch,{status:'completed',completed:ids.length,active_ids:[],queued_ids:[]});if(state.state.manual)Object.assign(state.state.manual,{status:'completed',completed:ids.length,finished_at:time()});for(const account_id of ids){const held=state.state.records[account_id]?.hold;state.state.records[account_id]={account_id,status:held?'recovering':'passed',hold:held,recovery_passes:held?1:0,checked_at:time(),next_at:time(held?2:30),reason:held?'复核通过，等待下一轮确认':'本轮 3 份有效样本通过',analysis:{predicted:config.targets.find(t=>t.account_id===account_id).expected}}}},7000);
+}
+reset('dashboard');
+document.getElementById('scenario').onchange=e=>{reset(e.target.value);frame.src='../ui/index.html?scene='+encodeURIComponent(e.target.value)+'#bridge_token=preview';};
+document.getElementById('size').onchange=e=>{document.body.dataset.size=e.target.value;};
+window.addEventListener('message',e=>{
+ if(e.source!==frame.contentWindow)return;const m=e.data;if(m.bridge_token!=='preview')return;
+ if(m.type==='ui.resize'){frame.style.height=Math.max(600,Number(m.height)||600)+'px';return;}
+ let payload={};
+ if(m.type==='config.load')payload={config};
+ else if(m.type==='config.save'){config=structuredClone(m.config);Object.assign(state,{enabled:config.enabled,auto_pause:config.auto_pause,auto_recover:config.auto_recover,targets:structuredClone(config.targets||[]),target_count:(config.targets||[]).filter(t=>t.enabled).length});payload={config};}
+ else if(m.type==='plugin.status')payload={result:{status_json:JSON.stringify(state)}};
+ else if(m.type==='config.test'){
+  if(!config.admin_key||config.admin_key==='denied'){payload={result:{success:false,message:'演示：请填写有效的管理密钥（可以输入任意非 denied 的文字）',status_json:JSON.stringify(state)}};}
+  else{
+   state.accounts=structuredClone(list);state.accounts_error='';state.connection={state:'ready',checked_at:time(),account_count:list.length};state.monitoring_state=!state.target_count?'waiting_targets':config.enabled?'running':'disabled';
+   if(config.manual_request_id&&config.manual_request_id!==lastCommand){lastCommand=config.manual_request_id;beginRun(lastCommand);state.diagnostic={kind:'manual'};}
+   else{state.diagnostic={kind:'connection'};delete state.manual_request;}
+   payload={result:{success:true,message:state.diagnostic.kind==='manual'?'演示：已加入检测队列':'演示：管理端已连接，账号已读取',status_json:JSON.stringify(state)}};
+  }
+ }else return;
+ frame.contentWindow.postMessage({source:'sub2api-plugin-host',bridge_token:'preview',request_id:m.request_id,ok:true,...payload},'*');
+});
+</script></body></html>

@@ -45,6 +45,7 @@ type ManualRun struct {
 	Completed   int       `json:"completed"`
 	Errors      int       `json:"errors"`
 	CurrentID   int64     `json:"current_id"`
+	RequestedAt time.Time `json:"requested_at"`
 	StartedAt   time.Time `json:"started_at"`
 	FinishedAt  time.Time `json:"finished_at"`
 	Message     string    `json:"message"`

@@ -5,10 +5,11 @@ import {JSDOM} from 'jsdom';
 const html=await readFile(new URL('../ui/index.html',import.meta.url),'utf8');
 const js=await readFile(new URL('../ui/app.js',import.meta.url),'utf8');
 const tick=()=>new Promise(r=>setTimeout(r,20));
-async function setup(){
+async function setup(options={}){
  const dom=new JSDOM(html,{url:'https://sub2api.invalid/api/v1/plugin-ui/test/index.html#bridge_token=token',runScripts:'outside-only'});const w=dom.window;const calls=[];const state={enabled:true,target_count:1,monitoring_state:'running',accounts:[{id:1,name:'自动读取的账号',type:'oauth',status:'active',schedulable:true,supported:true,suggested_model:'gpt-6.1-terra',suggested_expected:'gpt-6.1-terra'},{id:2,name:'另一个账号',type:'oauth',status:'active',schedulable:false,supported:true,suggested_model:'gpt-6.1-sol',suggested_expected:'gpt-6-astra'}],models:[{id:'gpt-6.1-terra',display_name:'Terra'}],state:{requests:9,records:{1:{account_id:1,status:'quarantined',hold:true,failures:3,analysis:{predicted:'<img src=x onerror=alert(1)>'},reason:'test',next_at:'2026-10-30T08:00:00Z'}},events:[]}};
  const config={enabled:true,auto_pause:true,auto_recover:true,pause_unavailable:false,admin_url:'http://127.0.0.1:8080',admin_key:'test-secret',data_dir:'/app/data/sub2api-account-guard',normal_seconds:1800,retry_seconds:120,quarantine_seconds:21600,timeout_seconds:180,daily_requests:2000,targets:[{account_id:1,model:'gpt-6.1-terra',expected:'gpt-6.1-terra',enabled:true}]};
- const host={postMessage(m){calls.push(m);if(!['config.load','config.save','config.test','plugin.status'].includes(m.type))return;const response={source:'sub2api-plugin-host',bridge_token:'token',request_id:m.request_id,ok:true};if(m.type==='config.load')response.config=config;else if(m.type==='config.save'){Object.assign(config,m.config);response.config=config;}else if(m.type==='config.test'){if(config.manual_request_id){state.manual_busy=true;response.result={success:true,message:'检测已开始',status_json:JSON.stringify(state)};}else response.result={success:true,message:'连接正常'};}else response.result={status_json:JSON.stringify(state)};queueMicrotask(()=>w.dispatchEvent(new w.MessageEvent('message',{source:host,data:response})));}};
+ Object.assign(config,options.config||{});Object.assign(state,options.state||{});
+ const host={postMessage(m){calls.push(m);if(!['config.load','config.save','config.test','plugin.status'].includes(m.type))return;const response={source:'sub2api-plugin-host',bridge_token:'token',request_id:m.request_id,ok:true};if(m.type==='config.load')response.config=config;else if(m.type==='config.save'){Object.assign(config,m.config);response.config=config;}else if(m.type==='config.test'){if(config.manual_request_id){state.manual_busy=true;response.result={success:true,message:'检测已开始',status_json:JSON.stringify(state)};}else response.result={success:true,message:'连接正常',status_json:JSON.stringify({...state,diagnostic:{kind:'connection'}})};}else response.result={status_json:JSON.stringify(state)};const deliver=()=>w.dispatchEvent(new w.MessageEvent('message',{source:host,data:response}));if(options.respond?.({m,response,config,state,w,deliver})!==false)queueMicrotask(deliver);}};
  Object.defineProperty(w,'parent',{value:host});w.eval(js);await tick();return {dom,w,calls,host,state,config};
 }
 test('bridge loads native config and renders status without interpreting upstream HTML',async()=>{const {dom,w,calls}=await setup();assert.equal(w.document.getElementById('auto_recover').checked,true);assert.equal(w.document.getElementById('holdCount').textContent,'1');assert.equal(w.document.querySelectorAll('#records img').length,0);assert.match(w.document.getElementById('records').textContent,/<img src=x/);assert(calls.some(x=>x.type==='plugin.status'));assert(calls.some(x=>x.type==='config.load'));dom.window.close();});
@@ -125,4 +126,157 @@ test('monitoring leads, settings are collapsed, and edits survive an active sche
  const el=w.document.getElementById('normal_seconds');el.value='2400';el.dispatchEvent(new w.Event('input',{bubbles:true}));assert.equal(w.document.getElementById('settings').disabled,false);assert.equal(w.document.getElementById('save').disabled,true);
  w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();assert.equal(calls.filter(x=>x.type==='config.save').length,0);
  state.batch_busy=false;state.batch.status='completed';w.document.getElementById('refresh').click();await tick();assert.equal(el.value,'2400');assert.equal(w.document.getElementById('save').disabled,false);dom.window.close();
+});
+
+test('first use leads with connection and saves only connection before discovery',async()=>{
+ const {dom,w,calls,state}=await setup({config:{admin_key:'',targets:[],enabled:false,auto_pause:false,auto_recover:false},state:{target_count:0,accounts:[],monitoring_state:'waiting_targets',connection:{state:'needs_credentials',next_action:'填写管理地址和密钥'}},respond({m,state,response}){
+  if(m.type==='config.test'){state.connection={state:'ready'};state.accounts=[{id:7,name:'首次接入的账号',type:'oauth',status:'active',schedulable:true,supported:true,suggested_model:'gpt-6.1-terra',suggested_expected:'gpt-6.1-terra'}];response.result={success:true,message:'管理端已连接',status_json:JSON.stringify({...state,diagnostic:{kind:'connection'}})};}
+ }});
+ assert.equal(w.document.getElementById('app').dataset.onboarding,'true');
+ assert.equal(w.document.getElementById('setupSteps').hidden,false);
+ assert.equal(w.document.getElementById('configPanel').open,true);
+ assert(w.document.getElementById('connectSection').compareDocumentPosition(w.document.getElementById('accountsSection'))&w.Node.DOCUMENT_POSITION_FOLLOWING);
+ w.document.getElementById('admin_key').value='new-key';w.document.getElementById('connectAccounts').click();await tick();await tick();
+ const save=calls.find(c=>c.type==='config.save');assert.equal(save.config.admin_key,'new-key');assert.deepEqual(save.config.targets,[]);
+ assert(calls.findIndex(c=>c.type==='config.save')<calls.findIndex(c=>c.type==='config.test'));
+ assert.match(w.document.getElementById('targets').textContent,/首次接入的账号/);
+ assert.equal(w.document.querySelector('#targets details').open,false);
+ assert.equal(w.document.getElementById('startSetup').disabled,true);
+ dom.window.close();
+});
+test('saving connection preserves unsaved selection and timing without committing them',async()=>{
+ const {dom,w,calls}=await setup();
+ const timing=w.document.getElementById('normal_seconds');timing.value='2400';timing.dispatchEvent(new w.Event('input',{bubbles:true}));
+ const selected=w.document.querySelector('#targets tr[data-account-id="2"] input[type=checkbox]');selected.checked=true;selected.dispatchEvent(new w.Event('change',{bubbles:true}));
+ const key=w.document.getElementById('admin_key');key.value='replacement-key';key.dispatchEvent(new w.Event('input',{bubbles:true}));
+ w.document.getElementById('connectAccounts').click();await tick();await tick();
+ const save=calls.find(c=>c.type==='config.save');assert.equal(save.config.normal_seconds,1800);assert.equal(save.config.targets.length,1);assert.equal(save.config.admin_key,'replacement-key');
+ assert.equal(timing.value,'2400');assert.equal(w.document.querySelector('#targets tr[data-account-id="2"] input[type=checkbox]').checked,true);
+ assert.match(w.document.getElementById('saveState').textContent,/未保存/);
+ dom.window.close();
+});
+test('only selected accounts require model inputs and model details survive discovery',async()=>{
+ const {dom,w,state}=await setup();
+ assert.equal(w.document.querySelector('#targets tr[data-account-id="1"] [data-field="model"]').required,true);
+ assert.equal(w.document.querySelector('#targets tr[data-account-id="2"] [data-field="model"]').required,false);
+ const detail=w.document.querySelector('#targets tr[data-account-id="1"] details');detail.open=true;
+ const input=detail.querySelector('input');input.focus();input.setSelectionRange(2,4);
+ state.accounts[0].name='刷新后的账号名称';w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.querySelector('#targets tr[data-account-id="1"] details').open,true);
+ assert.equal(w.document.activeElement.dataset.field,'model');assert.equal(w.document.activeElement.selectionStart,2);
+ const box=w.document.querySelector('#targets tr[data-account-id="2"] [data-field="enabled"]');box.checked=true;box.dispatchEvent(new w.Event('change',{bubbles:true}));
+ assert.equal(w.document.querySelector('#targets tr[data-account-id="2"] [data-field="model"]').required,true);
+ dom.window.close();
+});
+test('connection errors and stale host replies never look like a healthy monitor',async()=>{
+ let fail=false;
+ const {dom,w,state}=await setup({respond({m,response}){if(fail&&m.type==='plugin.status'){response.ok=false;response.error='宿主连接中断';}}});
+ state.monitoring_state='connection_error';state.accounts_error='管理密钥缺少权限（HTTP 403）';state.connection={state:'error',next_action:'检查密钥的账号权限'};
+ w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('runPanel').dataset.status,'error');assert.match(w.document.getElementById('runTitle').textContent,/管理连接/);
+ assert.equal(w.document.getElementById('lastError').hidden,false);
+ fail=true;w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('connection').hidden,false);assert.match(w.document.getElementById('connection').textContent,/宿主/);
+ assert.match(w.document.getElementById('runTitle').textContent,/无法同步/);assert.equal(w.document.getElementById('runNow').disabled,true);
+ dom.window.close();
+});
+test('late status response from before save cannot overwrite committed target changes',async()=>{
+ let hold=false,late;
+ const {dom,w,state,config}=await setup({respond({m,deliver,config,state}){if(m.type==='config.save')state.targets=config.targets.map(t=>({...t}));if(hold&&m.type==='plugin.status'){hold=false;late=deliver;return false;}}});
+ state.targets=config.targets.map(t=>({...t}));hold=true;w.document.getElementById('refresh').click();await tick();
+ const box=w.document.querySelector('#targets tr[data-account-id="2"] [data-field="enabled"]');box.checked=true;box.dispatchEvent(new w.Event('change',{bubbles:true}));
+ w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();await tick();
+ // The delayed response contains the old one-target snapshot.
+ late();await tick();
+ assert.equal(w.document.querySelector('#targets tr[data-account-id="2"] [data-field="enabled"]').checked,true);
+ assert.equal(config.targets.filter(t=>t.enabled).length,2);
+ dom.window.close();
+});
+test('connection-only diagnostic success is not accepted as a manual execution receipt',async()=>{
+ const {dom,w}=await setup({respond({m,response}){if(m.type==='config.test'){response.result={success:true,message:'连接正常',status_json:JSON.stringify({enabled:true,diagnostic:{kind:'connection'},state:{records:{},events:[]},accounts:[],target_count:1})};}}});
+ w.document.getElementById('runNow').click();await tick();await tick();
+ assert.match(w.document.getElementById('message').textContent,/未收到本次检测的入队回执/);
+ dom.window.close();
+});
+test('search Enter never submits configuration and monitoring filters retain visible scope',async()=>{
+ const {dom,w,calls}=await setup();
+ const search=w.document.getElementById('accountSearch'),event=new w.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});search.dispatchEvent(event);
+ assert.equal(event.defaultPrevented,true);assert.equal(calls.filter(c=>c.type==='config.save').length,0);
+ const filter=w.document.getElementById('monitorFilter');filter.value='held';filter.dispatchEvent(new w.Event('change'));
+ assert.equal(w.document.querySelector('#records tr[data-account-id="1"]').hidden,false);
+ w.document.getElementById('monitorSearch').value='不存在';w.document.getElementById('monitorSearch').dispatchEvent(new w.Event('input'));
+ assert.equal(w.document.querySelector('#records tr[data-account-id="1"]').hidden,true);assert.match(w.document.getElementById('monitorSummary').textContent,/没有符合/);
+ dom.window.close();
+});
+test('interrupted work and partial failures offer truthful recovery state',async()=>{
+ const {dom,w,state}=await setup();
+ state.batch={status:'completed_with_errors',errors:2,total:4,completed:4};w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('runPanel').dataset.status,'warning');assert.match(w.document.getElementById('runTitle').textContent,/重试/);
+ state.state.manual={status:'interrupted'};w.document.getElementById('refresh').click();await tick();
+ assert.match(w.document.getElementById('runTitle').textContent,/已中断/);assert.match(w.document.getElementById('runHint').textContent,/重新发起/);
+ dom.window.close();
+});
+test('independent recovery setting is explained when new automatic pauses are disabled',async()=>{
+ const {dom,w,state}=await setup();state.auto_pause=false;state.auto_recover=true;w.document.getElementById('refresh').click();await tick();
+ assert.match(w.document.getElementById('policySummary').textContent,/不新增暂停.*已有本插件暂停仍自动恢复/);
+ dom.window.close();
+});
+
+test('pure connection actions clear a leftover manual nonce without submitting draft edits',async()=>{
+ for(const id of ['diagnose','refreshAccounts','connectAccounts']){
+  const {dom,w,calls,state,config}=await setup({config:{manual_request_id:'pending-old-manual'}});
+  const timing=w.document.getElementById('normal_seconds');timing.value='2400';timing.dispatchEvent(new w.Event('input',{bubbles:true}));
+  w.document.getElementById(id).click();await tick();await tick();
+  const testIndex=calls.findIndex(c=>c.type==='config.test');assert(testIndex>=0,id);
+  const preceding=calls.slice(0,testIndex).filter(c=>c.type==='config.save');assert(preceding.length>0,id);
+  assert.equal(preceding.at(-1).config.manual_request_id,'',id);
+  assert.equal(preceding.at(-1).config.normal_seconds,1800,id);
+  assert.equal(config.manual_request_id,'',id);assert.equal(!!state.manual_busy,false,id);
+  assert.equal(timing.value,'2400',id);assert.match(w.document.getElementById('saveState').textContent,/未保存/,id);
+  assert(!w.document.getElementById('message').textContent.includes('检测已开始'),id);
+  dom.window.close();
+ }
+});
+test('connection diagnostics require a connection receipt even when the host reports success',async()=>{
+ const {dom,w}=await setup({respond({m,response,state}){if(m.type==='config.test')response.result={success:true,message:'已加入检测队列',status_json:JSON.stringify({...state,diagnostic:{kind:'manual'},manual_request:{id:'other',accepted:true}})};}});
+ w.document.getElementById('diagnose').click();await tick();await tick();
+ assert.match(w.document.getElementById('message').textContent,/未收到连接诊断回执/);assert.equal(w.document.getElementById('message').className,'error');
+ dom.window.close();
+});
+test('onboarding rejects unverified and stale connections but saved-empty targets do not trap a valid draft',async()=>{
+ const {dom,w,state}=await setup({config:{targets:[]},state:{target_count:0,accounts_checked_at:'0001-01-01T00:00:00Z',connection:{state:'checking',code:'connection_unverified'},readiness:{state:'needs_connection',checks:[{code:'connection_unverified',state:'blocked',next_action:'重新加载账号'}]}}});
+ const box=w.document.querySelector('#targets tr[data-account-id="1"] [data-field="enabled"]');box.checked=true;box.dispatchEvent(new w.Event('change',{bubbles:true}));
+ assert.equal(w.document.getElementById('stepConnect').dataset.complete,'false');assert.equal(w.document.getElementById('startSetup').disabled,true);
+ state.connection={state:'ready'};state.readiness={state:'choose_accounts',checks:[{code:'targets_required',state:'blocked',next_action:'勾选账号'}]};
+ w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('stepConnect').dataset.complete,'true');assert.equal(w.document.getElementById('startSetup').disabled,false);
+ state.connection={state:'stale'};state.readiness={state:'needs_connection',checks:[{code:'accounts_stale',state:'blocked'}]};
+ w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('stepConnect').dataset.complete,'false');assert.equal(w.document.getElementById('startSetup').disabled,true);
+ state.connection={state:'ready'};state.readiness={state:'needs_attention',checks:[{code:'api_bridge_missing',state:'blocked',account_ids:[2],next_action:'安装桥接'}]};
+ w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('startSetup').disabled,false,'an unrelated blocked account must not block the selected OAuth account');
+ dom.window.close();
+});
+test('runtime failure stops sampling controls while preserving connection and configuration recovery',async()=>{
+ const {dom,w,state,calls}=await setup();state.runtime_error='监测引擎重启与回滚失败，请修复状态目录后重新保存';state.connection={state:'ready'};
+ w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('runPanel').dataset.status,'error');assert.match(w.document.getElementById('runTitle').textContent,/监测服务需要修复/);
+ assert.match(w.document.getElementById('lastError').textContent,/重启与回滚失败/);assert.equal(w.document.getElementById('lastError').hidden,false);
+ assert.equal(w.document.getElementById('runNow').disabled,true);assert.equal(w.document.getElementById('startSetup').disabled,true);
+ assert.equal(w.document.getElementById('diagnose').disabled,false);assert(!w.document.getElementById('connection').textContent.includes('宿主状态不可用'));
+ const timing=w.document.getElementById('normal_seconds');timing.value='2400';timing.dispatchEvent(new w.Event('input',{bubbles:true}));
+ assert.equal(w.document.getElementById('save').disabled,false);w.document.getElementById('runNow').click();assert.equal(calls.filter(c=>c.type==='config.save').length,0);
+ dom.window.close();
+});
+test('an owned hold removed from saved monitoring never promises an automatic retest',async()=>{
+ const {dom,w,state}=await setup();
+ const box=w.document.querySelector('#targets tr[data-account-id="1"] [data-field="enabled"]');box.checked=false;box.dispatchEvent(new w.Event('change',{bubbles:true}));
+ assert(!w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent.includes('未参与监测'),'an unsaved deselection does not change runtime membership');
+ w.document.getElementById('discard').click();
+ state.targets=[{account_id:1,enabled:false,model:'gpt-6.1-terra',expected:'gpt-6.1-terra'},{account_id:2,enabled:true,model:'gpt-6.1-sol',expected:'gpt-6-astra'}];state.target_count=1;
+ w.document.getElementById('refresh').click();await tick();
+ const next=w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent;
+ assert.match(next,/未参与监测.*重新勾选并保存后复测.*保留暂停/);assert(!next.includes('小时后'));assert(!next.includes('确认恢复'));
+ dom.window.close();
 });

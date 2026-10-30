@@ -7,10 +7,26 @@ type BatchState struct {
 	Status     string    `json:"status"`
 	Total      int       `json:"total"`
 	Completed  int       `json:"completed"`
+	Errors     int       `json:"errors"`
 	QueuedIDs  []int64   `json:"queued_ids"`
 	ActiveIDs  []int64   `json:"active_ids"`
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
+}
+
+// A completed quality verdict is still a completed check, including mismatch.
+// These states mean a round could not produce/apply its intended result.
+func recordNeedsAttention(r *Record) bool {
+	if r == nil {
+		return true
+	}
+	switch r.Status {
+	case "unavailable", "skipped", "unsupported", "blocked", "external_change", "pause_uncertain":
+		return true
+	case "paused_observation":
+		return r.Analysis == nil || r.Analysis.Decision == "indeterminate"
+	}
+	return false
 }
 
 func withoutID(ids []int64, id int64) []int64 {

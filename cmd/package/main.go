@@ -27,7 +27,7 @@ func main() {
 	keyPath := flag.String("key", "", "Ed25519 seed file outside the repository")
 	keyID := flag.String("key-id", "cyeinfpro-account-guard-v1", "publisher id")
 	gen := flag.Bool("generate-key", false, "create private key if absent")
-	out := flag.String("out", "dist/ModelGuard-0.2.1.s2plugin", "output")
+	out := flag.String("out", "", "output; defaults to dist/ModelGuard-<VERSION>.s2plugin")
 	flag.Parse()
 	if *keyPath == "" {
 		must(fmt.Errorf("-key is required"))
@@ -53,6 +53,9 @@ func main() {
 	rawVersion, err := os.ReadFile("VERSION")
 	must(err)
 	version := strings.TrimSpace(string(rawVersion))
+	if *out == "" {
+		*out = fmt.Sprintf("dist/ModelGuard-%s.s2plugin", version)
+	}
 	files := map[string]string{}
 	data := map[string][]byte{}
 	for _, root := range []string{"ui", "licenses"} {
@@ -75,7 +78,7 @@ func main() {
 		must(err)
 		data["runtimes/linux-"+arch+"/account-guard"] = b
 	}
-	for _, name := range []string{"LICENSE", "COPYING", "README.md", "THIRD_PARTY_NOTICES.md"} {
+	for _, name := range []string{"LICENSE", "COPYING", "README.md", "THIRD_PARTY_NOTICES.md", "docs/API-BRIDGE.md", "scripts/api-credential-bridge.py"} {
 		b, err := os.ReadFile(name)
 		must(err)
 		data[name] = b
@@ -84,7 +87,7 @@ func main() {
 		h := sha256.Sum256(b)
 		files[name] = hex.EncodeToString(h[:])
 	}
-	manifest := map[string]any{"schema_version": 1, "id": "local.sub2api.account-guard", "name": "模型哨兵", "version": version, "description": "OAuth/API 账号并行检测、失败重试、首轮指纹不符暂停、两轮通过恢复。", "author": "cyeinfpro", "requires": map[string]any{"sub2api": ">=0.2.19 <0.3.0", "recommended_sub2api_version": "0.2.19", "plugin_protocol": 1, "transport_api": 1, "ui_bridge": 1}, "capabilities": []any{map[string]any{"id": "openai.oauth.outbound_transport.v1", "platform": "openai", "account_type": "oauth"}}, "runtimes": map[string]any{"linux-amd64": map[string]string{"path": "runtimes/linux-amd64/account-guard"}, "linux-arm64": map[string]string{"path": "runtimes/linux-arm64/account-guard"}}, "ui": map[string]string{"entrypoint": "ui/index.html"}, "files": files}
+	manifest := map[string]any{"schema_version": 1, "id": "local.sub2api.account-guard", "name": "模型哨兵", "version": version, "description": "分步接入、OAuth/API 并行巡检、明确状态、失败重试与自动恢复。", "author": "cyeinfpro", "requires": map[string]any{"sub2api": ">=0.2.19 <0.3.0", "recommended_sub2api_version": "0.2.19", "plugin_protocol": 1, "transport_api": 1, "ui_bridge": 1}, "capabilities": []any{map[string]any{"id": "openai.oauth.outbound_transport.v1", "platform": "openai", "account_type": "oauth"}}, "runtimes": map[string]any{"linux-amd64": map[string]string{"path": "runtimes/linux-amd64/account-guard"}, "linux-arm64": map[string]string{"path": "runtimes/linux-arm64/account-guard"}}, "ui": map[string]string{"entrypoint": "ui/index.html"}, "files": files}
 	mb, err := json.MarshalIndent(manifest, "", "  ")
 	must(err)
 	sig := ed25519.Sign(private, mb)

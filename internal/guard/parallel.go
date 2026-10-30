@@ -14,6 +14,13 @@ func (e *Engine) runTargets(ctx context.Context, now time.Time, targets []Target
 	e.batchMu.Lock()
 	defer e.batchMu.Unlock()
 	e.stateMu.Lock()
+	if e.Suspended.Load() || e.stopped.Load() {
+		e.stateMu.Unlock()
+		if force {
+			return errors.New("监测正在应用配置或已停止，请稍后重试")
+		}
+		return ctx.Err()
+	}
 	pending := make([]Target, 0, len(targets))
 	seen := map[int64]bool{}
 	for _, t := range targets {
@@ -57,8 +64,13 @@ func (e *Engine) runTargets(ctx context.Context, now time.Time, targets []Target
 		e.stateMu.Lock()
 		batch.FinishedAt = time.Now().UTC()
 		batch.Status = "completed"
+		if batch.Errors > 0 {
+			batch.Status = "completed_with_errors"
+		}
 		if ctx.Err() != nil {
 			batch.Status = "interrupted"
+		} else if batch.Errors == 0 {
+			e.clearLastErrorLocked()
 		}
 		batch.QueuedIDs = nil
 		batch.ActiveIDs = nil
@@ -108,8 +120,20 @@ func (e *Engine) runTargets(ctx context.Context, now time.Time, targets []Target
 				}
 				e.stateMu.Lock()
 				batch.ActiveIDs = withoutID(batch.ActiveIDs, t.AccountID)
-				batch.Completed++
-				e.publishLocked("")
+				message := ""
+				if ctx.Err() == nil {
+					batch.Completed++
+					r := e.Store.State.Records[t.AccountID]
+					if err != nil || recordNeedsAttention(r) {
+						batch.Errors++
+						if err != nil {
+							message = err.Error()
+						} else if r != nil {
+							message = r.Reason
+						}
+					}
+				}
+				e.publishLocked(message)
 				e.stateMu.Unlock()
 				if onDone != nil {
 					onDone(t, err)

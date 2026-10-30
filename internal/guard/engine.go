@@ -28,6 +28,8 @@ type Engine struct {
 	mu           sync.RWMutex
 	snapshot     []byte
 	lastError    string
+	storageError string // guarded by stateMu, separate from transient account errors
+	stopped      atomic.Bool
 	Suspended    atomic.Bool
 	ManualBusy   atomic.Bool
 	ManualQueued atomic.Bool
@@ -54,8 +56,11 @@ func NewEngine(c Config, d *fingerprint.Detector, a Admin, p Probe) (*Engine, er
 		s.Close()
 		return nil, err
 	}
-	if s.State.Manual != nil && s.State.Manual.Status == "running" {
+	if s.State.Manual != nil && (s.State.Manual.Status == "running" || s.State.Manual.Status == "queued") {
 		s.State.Manual.Status = "interrupted"
+		s.State.Manual.CurrentID = 0
+		s.State.Manual.CurrentIDs = nil
+		s.State.Manual.FinishedAt = time.Now().UTC()
 		s.State.Manual.Message = "检测被重启或配置变更中断，请重新发起"
 		if err := s.Save(); err != nil {
 			s.Close()
@@ -88,12 +93,79 @@ func (e *Engine) publishLocked(message string) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.lastError = message
-	e.snapshot, _ = json.Marshal(map[string]any{"enabled": e.Config.Enabled, "auto_pause": e.Config.AutoPause, "auto_recover": e.Config.AutoRecover, "last_error": message, "state": e.Store.State, "active_sample": e.activeSample, "active_samples": active, "batch": e.batch, "startup_ready_at": e.readyAt, "budget": e.budgetLocked(), "concurrency": e.Config.Concurrency, "detector_version": e.Detector.Version(), "models": e.Detector.Models()})
+	// Progress and idle polling cannot resolve an outstanding failure.
+	if message != "" {
+		e.lastError = message
+	}
+	lastError := e.lastError
+	if e.storageError != "" {
+		lastError = e.storageError
+	}
+	e.snapshot, _ = json.Marshal(map[string]any{"enabled": e.Config.Enabled, "auto_pause": e.Config.AutoPause, "auto_recover": e.Config.AutoRecover, "last_error": lastError, "storage_error": e.storageError, "state": e.Store.State, "active_sample": e.activeSample, "active_samples": active, "batch": e.batch, "startup_ready_at": e.readyAt, "budget": e.budgetLocked(), "concurrency": e.Config.Concurrency, "detector_version": e.Detector.Version(), "models": e.Detector.Models()})
 }
 func (e *Engine) Snapshot() string { e.mu.RLock(); defer e.mu.RUnlock(); return string(e.snapshot) }
+
+// TrySuspend closes the scheduling gate atomically with the idle check so a
+// timer cannot start a batch between the runtime's busy check and cancellation.
+func (e *Engine) TrySuspend() bool {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if e.ManualBusy.Load() || e.BatchBusy.Load() {
+		return false
+	}
+	e.Suspended.Store(true)
+	return true
+}
+
+func (e *Engine) Resume() {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if !e.stopped.Load() {
+		e.Suspended.Store(false)
+	}
+}
+
+func (e *Engine) clearLastErrorLocked() {
+	if e.storageError != "" {
+		return
+	}
+	for _, target := range e.Config.Targets {
+		if !target.Enabled {
+			continue
+		}
+		r := e.Store.State.Records[target.AccountID]
+		if r != nil && (recordNeedsAttention(r) || (e.Config.AutoRecover && r.Hold && r.Status == "recovery_ready")) {
+			// A different account finishing successfully does not resolve this
+			// account's outstanding control/probe failure.
+			return
+		}
+	}
+	e.mu.Lock()
+	e.lastError = ""
+	e.mu.Unlock()
+}
+
 func (e *Engine) Run(ctx context.Context) {
-	defer e.Store.Close()
+	defer func() {
+		e.stateMu.Lock()
+		e.stopped.Store(true)
+		e.Suspended.Store(true)
+		if run := e.Store.State.Manual; run != nil && (run.Status == "queued" || run.Status == "running") {
+			run.Status = "interrupted"
+			run.CurrentID = 0
+			run.CurrentIDs = nil
+			run.FinishedAt = time.Now().UTC()
+			run.Message = "检测被重启或配置变更中断，请重新发起"
+			if err := e.save(); err != nil {
+				e.publishLocked(err.Error())
+			}
+		}
+		e.ManualQueued.Store(false)
+		e.ManualBusy.Store(false)
+		e.publishLocked("")
+		e.Store.Close()
+		e.stateMu.Unlock()
+	}()
 	// Host TestConfig may create a short-lived runtime. Do not launch probes at
 	// ApplyConfig time: the persistent worker starts after this grace period.
 	timer := time.NewTimer(time.Until(e.readyAt))
@@ -124,8 +196,10 @@ func (e *Engine) Run(ctx context.Context) {
 }
 func (e *Engine) save() error {
 	if err := e.Store.Save(); err != nil {
-		return errors.New("持久化失败，停止账号变更")
+		e.storageError = "持久化失败，停止账号变更；请检查数据目录可写性和磁盘空间"
+		return errors.New(e.storageError)
 	}
+	e.storageError = ""
 	return nil
 }
 func (e *Engine) Tick(ctx context.Context, now time.Time) error {
@@ -336,19 +410,33 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		if pause {
 			return e.pause(ctx, a, r, done)
 		}
-		if r.Hold && r.RecoveryPasses >= 2 && c.AutoRecover && c.AutoPause {
+		if r.Hold && r.RecoveryPasses >= 2 && c.AutoRecover {
 			return e.recover(ctx, r, done)
 		}
 		return nil
 	}
 	return nil
 }
+
+// The caller holds stateMu. inFlight excludes another worker for this account;
+// control-plane I/O releases the global lock so unrelated accounts keep moving.
 func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.Time) error {
+	e.stateMu.Unlock()
 	latest, err := e.Admin.Account(ctx, r.AccountID)
+	e.stateMu.Lock()
 	if err != nil {
+		r.Status = "blocked"
+		r.Reason = "暂停前校验失败：" + err.Error()
+		r.NextAt = now.Add(time.Duration(e.Config.RetrySeconds) * time.Second)
+		if saved := e.save(); saved != nil {
+			return saved
+		}
 		return err
 	}
-	if !latest.Schedulable || latest.Status != "active" || !sameRevision(latest.UpdatedAt, before.UpdatedAt) {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !latest.Schedulable || latest.Status != "active" || !sameRevision(latest.UpdatedAt, before.UpdatedAt) || (latest.ExpiresAt != nil && !time.Now().Before(*latest.ExpiresAt)) {
 		r.Status = "external_change"
 		r.Reason = "采样期间账号已变更，本轮不执行暂停"
 		return e.save()
@@ -358,8 +446,20 @@ func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.
 	if err = e.save(); err != nil {
 		return err
 	}
+	e.publishLocked("")
+	e.stateMu.Unlock()
 	paused, err := e.Admin.Pause(ctx, r.AccountID)
+	e.stateMu.Lock()
 	if err != nil {
+		// A lost response does not prove the server failed to pause. Preserve
+		// intent for reconciliation without claiming automatic recovery rights.
+		r.Status = "pause_uncertain"
+		r.Reason = "暂停回执未确认；下次检测会核对调度状态：" + err.Error()
+		r.NextAt = time.Now().UTC().Add(time.Duration(e.Config.RetrySeconds) * time.Second)
+		e.Store.Event(r.AccountID, "pause_unconfirmed", r.Reason, time.Now().UTC())
+		if saved := e.save(); saved != nil {
+			return saved
+		}
 		return err
 	}
 	r.Pending = false
@@ -373,11 +473,22 @@ func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.
 	return e.save()
 }
 func (e *Engine) recover(ctx context.Context, r *Record, now time.Time) error {
+	e.stateMu.Unlock()
 	latest, err := e.Admin.Account(ctx, r.AccountID)
+	e.stateMu.Lock()
 	if err != nil {
+		r.Status = "recovery_ready"
+		r.Reason = "恢复前校验失败，保留现有暂停并稍后重试：" + err.Error()
+		r.NextAt = now.Add(time.Duration(e.Config.RetrySeconds) * time.Second)
+		if saved := e.save(); saved != nil {
+			return saved
+		}
 		return err
 	}
-	if latest.Schedulable || latest.Status != "active" || !sameRevision(latest.UpdatedAt, r.PauseUpdatedAt) || (latest.ExpiresAt != nil && !now.Before(*latest.ExpiresAt)) {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if latest.Schedulable || latest.Status != "active" || !sameRevision(latest.UpdatedAt, r.PauseUpdatedAt) || (latest.ExpiresAt != nil && !time.Now().Before(*latest.ExpiresAt)) {
 		r.Status = "external_change"
 		r.Reason = "恢复前状态校验不通过，不覆盖外部操作"
 		return e.save()
@@ -386,12 +497,22 @@ func (e *Engine) recover(ctx context.Context, r *Record, now time.Time) error {
 	if err = e.save(); err != nil {
 		return err
 	}
+	e.publishLocked("")
+	e.stateMu.Unlock()
 	resumed, err := e.Admin.Resume(ctx, r.AccountID)
-	if err != nil {
-		return err
+	e.stateMu.Lock()
+	if err == nil && !resumed.Schedulable {
+		err = errors.New("恢复结果未确认")
 	}
-	if !resumed.Schedulable {
-		return errors.New("恢复结果未确认")
+	if err != nil {
+		r.Status = "recovery_ready"
+		r.Reason = "自动恢复暂未完成，保留暂停记录并稍后核对：" + err.Error()
+		r.NextAt = time.Now().UTC().Add(time.Duration(e.Config.RetrySeconds) * time.Second)
+		e.Store.Event(r.AccountID, "recovery_unconfirmed", r.Reason, time.Now().UTC())
+		if saved := e.save(); saved != nil {
+			return saved
+		}
+		return err
 	}
 	r.Hold = false
 	r.Status = "passed"

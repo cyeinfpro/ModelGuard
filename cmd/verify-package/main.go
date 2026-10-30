@@ -22,9 +22,14 @@ func must(err error) {
 	}
 }
 func main() {
-	archive := flag.String("archive", "dist/ModelGuard-0.2.1.s2plugin", "archive")
+	archive := flag.String("archive", "", "archive; defaults to dist/ModelGuard-<VERSION>.s2plugin")
 	public := flag.String("public-key", "dist/publisher-public-key.txt", "public key file")
 	flag.Parse()
+	if *archive == "" {
+		version, err := os.ReadFile("VERSION")
+		must(err)
+		*archive = fmt.Sprintf("dist/ModelGuard-%s.s2plugin", strings.TrimSpace(string(version)))
+	}
 	z, err := zip.OpenReader(*archive)
 	must(err)
 	defer z.Close()

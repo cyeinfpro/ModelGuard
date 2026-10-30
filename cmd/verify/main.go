@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,13 @@ func main() {
 	info, err := api.GetInfo(ctx, &v1.GetInfoRequest{})
 	if err != nil {
 		panic(err)
+	}
+	expectedVersion, err := os.ReadFile("VERSION")
+	if err != nil {
+		panic(err)
+	}
+	if info.PluginVersion != strings.TrimSpace(string(expectedVersion)) {
+		panic("built runtime version does not match VERSION")
 	}
 	v, err := api.ValidateConfig(ctx, &v1.ValidateConfigRequest{ConfigJson: []byte(`{}`)})
 	if err != nil || !v.Valid {

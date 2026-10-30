@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,7 +22,7 @@ import (
 const ID = "local.sub2api.account-guard"
 const Capability = "openai.oauth.outbound_transport.v1"
 
-var Version = "0.2.1"
+var Version = "0.3.0"
 
 type Plugin struct {
 	v1.UnimplementedTransportPluginServer
@@ -40,7 +41,11 @@ type Plugin struct {
 	accountsError   string
 	accountsLoading bool
 	accountsUpdated time.Time
+	accountsChecked time.Time
+	accountsEpoch   uint64
+	accountsRequest uint64
 	pendingManual   string
+	runtimeError    string
 }
 
 func New() (*Plugin, error) {
@@ -85,6 +90,9 @@ func (p *Plugin) resolve(ctx context.Context, id int64) (guard.Identity, error) 
 	}
 	headers := http.Header{}
 	for k, v := range r.Headers {
+		if v == nil {
+			continue
+		}
 		headers[k] = append([]string(nil), v.Values...)
 	}
 	return guard.Identity{Token: r.Token, Proxy: r.ProxyUrl, Headers: headers}, nil
@@ -96,8 +104,12 @@ func (p *Plugin) Health(context.Context, *v1.HealthRequest) (*v1.HealthResponse,
 	p.mu.RLock()
 	e, cfg, host := p.engine, p.config, p.host != nil
 	accounts := append([]guard.AccountOption{}, p.accounts...)
-	listError, loading, updated := p.accountsError, p.accountsLoading, p.accountsUpdated
+	listError, loading, updated, checked := p.accountsError, p.accountsLoading, p.accountsUpdated, p.accountsChecked
+	pending, runtimeError := p.pendingManual, p.runtimeError
 	p.mu.RUnlock()
+	now := time.Now().UTC()
+	connection := connectionStatus(cfg, len(accounts), listError, loading, checked, updated, now)
+	bridge := inspectBridge(cfg.DataDir)
 	status := map[string]any{}
 	if e != nil {
 		_ = json.Unmarshal([]byte(e.Snapshot()), &status)
@@ -117,10 +129,20 @@ func (p *Plugin) Health(context.Context, *v1.HealthRequest) (*v1.HealthResponse,
 		if listError != "" {
 			mode = "connection_error"
 		}
-		if loading && updated.IsZero() {
+		if loading && updated.IsZero() && listError == "" {
 			mode = "loading_accounts"
 		}
+		if runtimeError != "" {
+			mode = "runtime_error"
+		}
 	}
+	status["status_version"] = 2
+	status["observed_at"] = now
+	status["connection"] = connection
+	status["readiness"] = readinessStatus(cfg, accounts, connection, host, bridge, runtimeError)
+	status["runtime_error"] = runtimeError
+	status["manual_pending"] = pending != ""
+	status["manual_request_id"] = cfg.ManualRequestID
 	status["manual_busy"] = e != nil && e.ManualBusy.Load()
 	status["manual_queued"] = e != nil && e.ManualQueued.Load()
 	status["batch_busy"] = e != nil && e.BatchBusy.Load()
@@ -128,8 +150,9 @@ func (p *Plugin) Health(context.Context, *v1.HealthRequest) (*v1.HealthResponse,
 	status["auto_pause"] = cfg.AutoPause
 	status["auto_recover"] = cfg.AutoRecover
 	status["host_identity_available"] = host
-	_, bridgeErr := os.Stat(filepath.Join(cfg.DataDir, "api-bridge.sock"))
-	status["api_bridge_ready"] = bridgeErr == nil
+	status["api_bridge_ready"] = bridge.State == "installed"
+	status["api_bridge_state"] = bridge.State
+	status["api_bridge_message"] = bridge.Message
 	status["models"] = p.detector.Models()
 	status["detector_version"] = p.detector.Version()
 	status["target_count"] = count
@@ -139,15 +162,40 @@ func (p *Plugin) Health(context.Context, *v1.HealthRequest) (*v1.HealthResponse,
 	status["accounts_error"] = listError
 	status["accounts_loading"] = loading
 	status["accounts_updated_at"] = updated
+	status["accounts_checked_at"] = checked
 	raw, _ := json.Marshal(status)
-	return &v1.HealthResponse{Healthy: true, Message: "Account Guard runtime ready", StatusJson: string(raw)}, nil
+	message := "ModelGuard runtime ready"
+	if runtimeError != "" {
+		message = runtimeError
+	}
+	return &v1.HealthResponse{Healthy: runtimeError == "", Message: message, StatusJson: string(raw)}, nil
 }
 func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	// Bound the entire paginated discovery, not just each individual request.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	p.mu.Lock()
+	epoch := p.accountsEpoch
+	p.accountsRequest++
+	request := p.accountsRequest
+	if p.config.AdminURL == c.AdminURL && p.config.AdminKey == c.AdminKey {
+		p.accountsLoading = true
+	}
+	p.mu.Unlock()
 	accounts, err := guard.NewAdmin(c).ListAccounts(ctx)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.config.AdminURL == c.AdminURL && p.config.AdminKey == c.AdminKey {
+	if p.config.AdminURL == c.AdminURL && p.config.AdminKey == c.AdminKey && p.accountsEpoch == epoch && p.accountsRequest == request {
 		p.accountsLoading = false
+		// Shutdown and replaced configurations are not connectivity failures.
+		// An old response must never erase a newer account list or error.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return len(accounts), ctx.Err()
+		}
+		p.accountsChecked = time.Now().UTC()
 		if err != nil {
 			p.accountsError = err.Error()
 		} else {
@@ -159,10 +207,12 @@ func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, erro
 	return len(accounts), err
 }
 func (p *Plugin) discoveryLoop(ctx context.Context, c guard.Config) {
+	if strings.TrimSpace(c.AdminKey) == "" {
+		<-ctx.Done()
+		return
+	}
 	for {
-		bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
-		_, _ = p.refreshAccounts(bounded, c)
-		cancel()
+		_, _ = p.refreshAccounts(ctx, c)
 		timer := time.NewTimer(10 * time.Second)
 		select {
 		case <-ctx.Done():
@@ -189,6 +239,7 @@ func (p *Plugin) ApplyConfig(ctx context.Context, r *v1.ApplyConfigRequest) (*v1
 	}
 	p.mu.RLock()
 	old := p.config
+	oldPending := p.pendingManual
 	engine := p.engine
 	cancel := p.cancel
 	done := p.done
@@ -209,7 +260,7 @@ func (p *Plugin) ApplyConfig(ctx context.Context, r *v1.ApplyConfigRequest) (*v1
 		p.mu.Unlock()
 		return &v1.ApplyConfigResponse{Applied: true, Message: "检测请求已保存"}, nil
 	}
-	if engine != nil && (engine.ManualBusy.Load() || engine.BatchBusy.Load()) {
+	if engine != nil && !engine.TrySuspend() {
 		return &v1.ApplyConfigResponse{Message: "检测执行中，编辑内容已保留；请等待本轮完成后保存"}, nil
 	}
 	if cancel != nil {
@@ -222,8 +273,15 @@ func (p *Plugin) ApplyConfig(ctx context.Context, r *v1.ApplyConfigRequest) (*v1
 	if err != nil {
 		_, restore := p.start(old)
 		if restore != nil {
+			p.mu.Lock()
+			p.engine, p.cancel, p.done = nil, nil, nil
+			p.runtimeError = "配置失败且旧监测无法重启；请检查状态目录"
+			p.mu.Unlock()
 			return &v1.ApplyConfigResponse{Message: "配置失败且旧监测无法重启；请检查状态目录"}, nil
 		}
+		p.mu.Lock()
+		p.pendingManual = oldPending
+		p.mu.Unlock()
 		return &v1.ApplyConfigResponse{Message: err.Error()}, nil
 	}
 	// A new manual command saved WITH configuration changes must survive start.
@@ -233,11 +291,20 @@ func (p *Plugin) ApplyConfig(ctx context.Context, r *v1.ApplyConfigRequest) (*v1
 		p.pendingManual = c.ManualRequestID
 		p.mu.Unlock()
 	}
-	return &v1.ApplyConfigResponse{Applied: true, Message: "配置已保存；定时检测将在 60 秒后开始"}, nil
+	message := "配置已保存；定时检测已关闭，可手动检测"
+	if c.Enabled {
+		message = "配置已保存；定时检测将在 60 秒后开始"
+	} else if len(c.Targets) == 0 {
+		message = "连接信息已保存，请加载账号"
+	}
+	return &v1.ApplyConfigResponse{Applied: true, Message: message}, nil
 }
 func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 	var e *guard.Engine
-	if c.Enabled || len(c.Targets) > 0 {
+	// Keep existing ownership/history visible even after the last target is
+	// deselected. An unconfigured fresh installation need not create a store.
+	_, stateErr := os.Stat(filepath.Join(c.DataDir, "state.json"))
+	if c.Enabled || len(c.Targets) > 0 || !os.IsNotExist(stateErr) {
 		admin := guard.NewAdmin(c)
 		admin.Enrich = func(ctx context.Context, a *guard.Account) error {
 			if a.Type == "apikey" {
@@ -263,15 +330,21 @@ func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	p.mu.Lock()
+	sameConnection := p.config.AdminURL == c.AdminURL && p.config.AdminKey == c.AdminKey
 	p.engine = e
 	p.pendingManual = ""
 	p.config = c
 	p.cancel = cancel
 	p.done = done
-	p.accounts = []guard.AccountOption{}
-	p.accountsError = ""
-	p.accountsLoading = true
-	p.accountsUpdated = time.Time{}
+	p.runtimeError = ""
+	p.accountsEpoch++
+	p.accountsLoading = strings.TrimSpace(c.AdminKey) != ""
+	if !sameConnection {
+		p.accounts = []guard.AccountOption{}
+		p.accountsError = ""
+		p.accountsUpdated = time.Time{}
+		p.accountsChecked = time.Time{}
+	}
 	p.mu.Unlock()
 	go func() {
 		defer close(done)
@@ -286,34 +359,55 @@ func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 	return e, nil
 }
 func (p *Plugin) TestConfig(ctx context.Context, r *v1.TestConfigRequest) (*v1.TestConfigResponse, error) {
+	start := time.Now()
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
-	p.mu.Lock()
-	engine, request := p.engine, p.pendingManual
-	// Only an explicit command saved in this running process may trigger a run.
-	// Startup/temporary test processes cannot replay persisted commands.
-	p.pendingManual = ""
-	p.mu.Unlock()
-	if request != "" && engine != nil {
-		c, err := guard.ParseConfig(r.ConfigJson, p.detector)
-		if err != nil || c.ManualRequestID != request {
-			return &v1.TestConfigResponse{Message: "检测请求与已保存配置不一致"}, nil
-		}
-		if err := engine.RequestManual(request); err != nil {
-			return &v1.TestConfigResponse{Message: err.Error()}, nil
-		}
-		h, _ := p.Health(ctx, &v1.HealthRequest{})
-		return &v1.TestConfigResponse{Success: true, Message: "检测已开始，正在按并发上限检测已选账号", StatusJson: h.StatusJson}, nil
-	}
-	start := time.Now()
 	c, err := guard.ParseConfig(r.ConfigJson, p.detector)
 	if err != nil {
-		return &v1.TestConfigResponse{Message: err.Error()}, nil
+		return p.testResponse(start, false, err.Error(), map[string]any{"kind": "connection", "code": "config_invalid", "config_applied": false}), nil
+	}
+	p.mu.RLock()
+	engine, request, committed, applied := p.engine, p.pendingManual, p.config, p.done != nil
+	p.mu.RUnlock()
+	configMatches := reflect.DeepEqual(c, committed)
+	if err := ctx.Err(); err != nil {
+		return p.testResponse(start, false, "请求已取消，请重新操作", map[string]any{"kind": "connection", "code": "request_cancelled", "config_applied": applied && configMatches}), nil
+	}
+	// Only a command explicitly saved in this process may trigger a run.
+	// Validate before consuming it; mismatched diagnostics and transient queue
+	// errors must not silently lose a user's pending click.
+	if request != "" {
+		meta := map[string]any{"kind": "manual", "config_applied": applied && configMatches, "request_id": request}
+		if c.ManualRequestID != request || !configMatches {
+			meta["code"] = "config_mismatch"
+			return p.testResponse(start, false, "检测请求与已保存配置不一致，请重新加载配置", meta), nil
+		}
+		if engine == nil {
+			meta["code"] = "runtime_unavailable"
+			return p.testResponse(start, false, "监测服务尚未就绪，请先选择账号并保存", meta), nil
+		}
+		if err := engine.RequestManual(request); err != nil {
+			meta["code"] = "manual_not_accepted"
+			return p.testResponse(start, false, err.Error(), meta), nil
+		}
+		p.mu.Lock()
+		p.pendingManual = ""
+		p.mu.Unlock()
+		meta["code"] = "manual_queued"
+		meta["accepted"] = true
+		return p.testResponse(start, true, "已加入检测队列，将按并发上限逐个检测已选账号", meta), nil
+	}
+	// v1's iframe bridge tests saved configuration. Reject a stale request
+	// rather than presenting its result as the current runtime's connection.
+	if applied && !configMatches {
+		return p.testResponse(start, false, "配置已发生变化，请重新加载后再检测连接", map[string]any{"kind": "connection", "code": "config_mismatch", "config_applied": false}), nil
 	}
 	// Check authentication and pagination even when there are no targets.
 	n, err := p.refreshAccounts(ctx, c)
+	meta := map[string]any{"kind": "connection", "config_applied": applied && configMatches, "account_count": n}
 	if err != nil {
-		return &v1.TestConfigResponse{Message: err.Error()}, nil
+		meta["code"] = connectionErrorCode(err.Error())
+		return p.testResponse(start, false, err.Error(), meta), nil
 	}
 	selected := 0
 	for _, t := range c.Targets {
@@ -321,10 +415,22 @@ func (p *Plugin) TestConfig(ctx context.Context, r *v1.TestConfigRequest) (*v1.T
 			selected++
 		}
 	}
-	message := fmt.Sprintf("已获取 %d 个账号；已选择 %d 个检测目标", n, selected)
-	message += "；OAuth 与 API 账号均按指定账号独立检测"
-	h, _ := p.Health(ctx, &v1.HealthRequest{})
-	return &v1.TestConfigResponse{Success: true, Message: message, LatencyMs: time.Since(start).Milliseconds(), StatusJson: h.StatusJson}, nil
+	message := fmt.Sprintf("管理端已连接，读取到 %d 个授权账号；已选择 %d 个检测目标", n, selected)
+	meta["code"] = "connection_ready"
+	return p.testResponse(start, true, message, meta), nil
+}
+
+func (p *Plugin) testResponse(start time.Time, success bool, message string, diagnostic map[string]any) *v1.TestConfigResponse {
+	h, _ := p.Health(context.Background(), &v1.HealthRequest{})
+	status := map[string]any{}
+	_ = json.Unmarshal([]byte(h.StatusJson), &status)
+	diagnostic["checked_at"] = time.Now().UTC()
+	status["diagnostic"] = diagnostic
+	if diagnostic["kind"] == "manual" && diagnostic["accepted"] == true {
+		status["manual_request"] = map[string]any{"id": diagnostic["request_id"], "accepted": true, "state": "queued"}
+	}
+	raw, _ := json.Marshal(status)
+	return &v1.TestConfigResponse{Success: success, Message: message, LatencyMs: time.Since(start).Milliseconds(), StatusJson: string(raw)}
 }
 func (p *Plugin) Close() {
 	p.applyMu.Lock()
@@ -342,5 +448,12 @@ func (p *Plugin) Close() {
 		p.conn.Close()
 	}
 	p.cancel = nil
+	p.done = nil
+	p.engine = nil
+	p.host = nil
+	p.conn = nil
+	p.pendingManual = ""
+	p.accountsEpoch++
+	p.accountsLoading = false
 	p.mu.Unlock()
 }

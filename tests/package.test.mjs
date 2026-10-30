@@ -6,10 +6,13 @@ import {execFileSync} from 'node:child_process';
 import {createPublicKey,verify,createHash} from 'node:crypto';
 import Ajv2020 from 'ajv/dist/2020.js';
 
-test('release archive matches host schema, signature, and every file hash',{skip:!existsSync('dist/ModelGuard-0.2.1.s2plugin')},async()=>{
- const archive='dist/ModelGuard-0.2.1.s2plugin';
+const version=(await readFile('VERSION','utf8')).trim();
+const archive=`dist/ModelGuard-${version}.s2plugin`;
+
+test('release archive matches host schema, signature, and every file hash',{skip:!existsSync(archive)},async()=>{
  const read=name=>execFileSync('unzip',['-p',archive,name],{maxBuffer:64*1024*1024});
  const raw=read('manifest.json');const manifest=JSON.parse(raw);
+ assert.equal(manifest.version,version,'the package must match the current source version');
  const schema=JSON.parse(await readFile('internal/pluginv1/manifest.schema.json','utf8'));
  const ajv=new Ajv2020({strict:false});const validate=ajv.compile(schema);
  assert(validate(manifest),JSON.stringify(validate.errors));
