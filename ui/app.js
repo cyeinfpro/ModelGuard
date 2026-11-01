@@ -9,9 +9,9 @@
   let savedConfig = {}, dirty = false, busy = false, manualBusy = false, batchBusy = false, runtimeReady = false, lastRefresh = 0;
   let stateEpoch=0, refreshSequence=0, lastFetchError="", onboarding=false;
   const bools = ["enabled", "auto_pause", "auto_recover"];
-  const strings = ["admin_url", "admin_key", "data_dir"];
+  const strings = ["admin_url", "admin_key", "data_dir", "group_model", "group_expected"];
   const nums = ["concurrency","normal_seconds", "retry_seconds", "quarantine_seconds", "timeout_seconds", "daily_requests"];
-  const names = {paused_observation:"暂停中 · 仅复测",passed:"通过",suspect:"待复核",unavailable:"检测失败",quarantined:"指纹不符",recovering:"恢复复核中",recovery_ready:"等待自动恢复",pause_recommended:"建议隔离",external_change:"外部变更 · 已保护",skipped:"跳过",blocked:"需处理",unsupported:"不支持",pause_uncertain:"暂停回执不确定",unverified:"待检测"};
+  const names = {paused_observation:"暂停中 · 仅复测",passed:"通过",suspect:"待复核",unavailable:"检测失败",quarantined:"指纹不符",recovering:"恢复复核中",recovery_ready:"等待自动恢复",pause_recommended:"建议隔离",external_change:"旧保护记录 · 待复测",skipped:"跳过",blocked:"需处理",unsupported:"不支持",pause_uncertain:"暂停待核对 · 待复测",unverified:"待检测"};
   const modes = {disabled:"监测未开启",running:"监测已启用",waiting_targets:"等待选择账号",connection_error:"管理连接异常",loading_accounts:"正在加载账号"};
   function message(text, error=false) { $("message").setAttribute("role",error?"alert":"status"); $("message").textContent=text; $("message").className=error?"error":""; }
   function send(type, payload={}) {
@@ -89,30 +89,41 @@
     filterAccounts();
     if(focus){const row=$("targets").querySelector(`tr[data-account-id="${focus.id}"]`);const el=focus.summary?row?.querySelector("summary"):row?.querySelector(`[data-field="${focus.field}"]`);el?.focus({preventScroll:true});if(el?.type==="text"&&focus.start!==null)el.setSelectionRange(focus.start,focus.end);}
   }
+  function groupIDs(){return $("group_ids").value.trim().split(/[,，\s]+/).filter(Boolean).map(Number);}
+  function validateGroups(){const ids=groupIDs();if(ids.length>100||ids.some(id=>!Number.isSafeInteger(id)||id<=0)||new Set(ids).size!==ids.length){message("分组 ID 必须为不重复的正整数，最多 100 个",true);return false;}if(!!$("group_model").value.trim()!==!!$("group_expected").value.trim()){message("新成员请求模型与预期指纹需同时填写，或同时留空",true);return false;}return true;}
+  function activeTargets(s=lastStatus){return savedConfig.group_ids?.length?(s?.group_sync_error?[]:(s?.targets||[])):Array.from(configured.values());}
   function readConfig(){
     collectDrafts();const c={...savedConfig};
     for(const k of bools)c[k]=$(k).checked;
     for(const k of strings)c[k]=$(k).value.trim();
     for(const k of nums)c[k]=Number($(k).value);
+    c.group_ids=groupIDs();
     if(savedConfig.manual_request_id)c.manual_request_id=savedConfig.manual_request_id;
     c.targets=Array.from(drafts.values()).filter(t=>t.enabled||(configured.has(t.account_id)&&(accounts.some(a=>a.id===t.account_id)||lastStatus?.accounts_error||lastStatus?.accounts_loading))||lastStatus?.state?.records?.[t.account_id]?.hold||lastStatus?.state?.records?.[t.account_id]?.pending);
     return c;
   }
   function fill(c){
     savedConfig=JSON.parse(JSON.stringify(c));dirty=false;
-    onboarding=!c.admin_key||!(c.targets||[]).some(t=>t.enabled);
+    onboarding=!c.admin_key||(!(c.targets||[]).some(t=>t.enabled)&&!c.group_ids?.length);
     for(const k of bools)if(k in c)$(k).checked=c[k];
     for(const k of [...strings,...nums])if(k in c)$(k).value=c[k];
+    $("group_ids").value=(c.group_ids||[]).join(", ");
+    for(const key of ["group_model","group_expected"])$(key).value=c[key]||"";
     configured=new Map((c.targets||[]).map(t=>[t.account_id,{...t}]));drafts=new Map((c.targets||[]).map(t=>[t.account_id,{...t}]));
     $("targets").replaceChildren();loaded=true;renderAccounts();updateControls();if(!c.admin_key||!(c.targets||[]).some(t=>t.enabled))$("configPanel").open=true;if(lastStatus)render(lastStatus);updateFlow();
   }
   function date(value){if(!value||value.startsWith("0001"))return "—";return new Date(value).toLocaleString("zh-CN",{hour12:false});}
   function render(s,syncTargets=false){
-    if(syncTargets&&loaded&&!dirty&&!busy&&Array.isArray(s.targets)&&JSON.stringify(s.targets)!==JSON.stringify(Array.from(configured.values()))){
-      configured=new Map(s.targets.map(t=>[t.account_id,{...t}]));drafts=new Map(s.targets.map(t=>[t.account_id,{...t}]));savedConfig.targets=s.targets.map(t=>({...t}));
+    if(syncTargets&&!dirty&&!busy&&Array.isArray(s.group_ids)){savedConfig.group_ids=[...s.group_ids];$("group_ids").value=s.group_ids.join(", ");}
+    const configuredTargets=s.configured_targets||(savedConfig.group_ids?.length?null:s.targets);
+    if(syncTargets&&loaded&&!dirty&&!busy&&Array.isArray(configuredTargets)&&JSON.stringify(configuredTargets)!==JSON.stringify(Array.from(configured.values()))){
+      configured=new Map(configuredTargets.map(t=>[t.account_id,{...t}]));drafts=new Map(configuredTargets.map(t=>[t.account_id,{...t}]));savedConfig.targets=configuredTargets.map(t=>({...t}));
       $("targets").replaceChildren();accountSignature="";
     }
     lastStatus=s;
+    const pendingGroups=s.group_sync_pending_ids||[];
+    $("groupSyncStatus").hidden=!savedConfig.group_ids?.length;
+    $("groupSyncStatus").textContent=savedConfig.group_ids?.length?`分组同步管理 ${s.target_count||0} 个账号${pendingGroups.length?`；${pendingGroups.length} 个新成员等待配置：${pendingGroups.join(", ")}`:""}。${s.group_sync_error||s.accounts_error?"同步未确认，当前目标数可能是上次快照；不按旧成员关系恢复。"+(s.group_sync_error||""):""}`:"";
     models=s.models||models;
     updateConnection(s);
     $("lastError").textContent=s.runtime_error||s.storage_error||s.last_error||s.accounts_error||"";$("lastError").hidden=!$("lastError").textContent;
@@ -130,9 +141,9 @@
     for(const event of events){const row=document.createElement("div");row.className="event";for(const [tag,text] of [["time",date(event.at)],["span",accounts.find(a=>a.id===event.account_id)?.name||String(event.account_id)],["span",event.reason]]){const el=document.createElement(tag);el.textContent=text;row.append(el);}$("events").append(row);}
   }
   function renderRecords(s){
-    const state=s.state||{},saved=new Set(Array.from(configured.values()).filter(t=>t.enabled).map(t=>t.account_id));
+    const state=s.state||{},saved=new Set(activeTargets(s).filter(t=>t.enabled).map(t=>t.account_id));
     const selected=new Set(saved),unsaved=new Set();
-    if(dirty)for(const t of drafts.values())if(t.enabled&&!saved.has(t.account_id)){selected.add(t.account_id);unsaved.add(t.account_id);}
+    if(dirty&&!savedConfig.group_ids?.length)for(const t of drafts.values())if(t.enabled&&!saved.has(t.account_id)){selected.add(t.account_id);unsaved.add(t.account_id);}
     const all=Object.values(state.records||{}),map=new Map(all.filter(r=>selected.has(r.account_id)||r.hold||r.pending).map(r=>[r.account_id,r]));
     for(const id of selected)if(!map.has(id))map.set(id,{account_id:id,status:"unverified"});
     const rows=Array.from(map.values()).sort((a,b)=>a.account_id-b.account_id),byID=new Map(accounts.map(a=>[a.id,a]));
@@ -153,7 +164,7 @@
       if(r.status==="skipped"&&a?.schedulable&&!r.hold){label="待自动检测";reason="账号已恢复可调度，等待下一轮检查；上次："+(r.reason||"跳过");}
       if(unsaved.has(r.account_id)){label="待保存";reason="已勾选，保存配置后加入自动检测";next="保存后开始";}
       if(!sample&&s.batch?.queued_ids?.includes(r.account_id)){label="本轮排队中";next="有空位后自动开始";}
-      if(!sample&&!r.hold&&a&&a.status==="active"&&!a.schedulable)next="仅手动复测，不改变调度";
+      if(!sample&&!r.hold&&a&&a.status==="active"&&!a.schedulable&&saved.has(r.account_id))next=s.enabled?"待插件复测；两轮通过后按恢复开关处理":"等待手动复测；按恢复开关处理";
       if(sample){label=sample.phase==="retry_wait"?"等待自动重试":`检测中 · ${sample.index}/3`;if(sample.attempt>1)label+=` · 重试 ${sample.attempt-1}/2`;next="正在检测";}
       const result=cell(row,"");const tag=document.createElement("span");tag.className="tag "+(sample?"active":r.status==="passed"&&runtimeReady?"good":r.hold?"bad":"");tag.textContent=label;result.append(tag);
       if(sample){const progress=document.createElement("span");progress.className="reason";progress.textContent=`${phaseName(sample.phase)}${sample.attempt>1?` · 第 ${sample.attempt-1}/2 次重试`:""}`;result.append(progress);}
@@ -171,10 +182,15 @@
   function phaseName(phase){return {retry_wait:"等待重试",identity:"准备账号",connecting:"连接上游",receiving:"等待回答",reasoning:"正在生成",output:"接收回答"}[phase]||"正在检测";}
   function relativeTime(value){if(!value||value.startsWith("0001"))return "等待调度";const seconds=Math.ceil((new Date(value).getTime()-Date.now())/1000);if(seconds<=0)return "即将开始";if(seconds<60)return `${seconds} 秒后`;if(seconds<3600)return `约 ${Math.ceil(seconds/60)} 分钟后`;return `约 ${Math.ceil(seconds/3600)} 小时后`;}
   function nextAction(r,s=lastStatus){
-    if(!configured.get(r.account_id)?.enabled&&(r.hold||r.pending))return "未参与监测，重新勾选并保存后复测；保留暂停";
+    if(savedConfig.group_ids?.length&&s?.group_sync_error)return "等待分组同步确认；暂不恢复";
+    if(!activeTargets(s).some(t=>t.account_id===r.account_id&&t.enabled)&&(r.hold||r.pending))return savedConfig.group_ids?.length?"不在当前管理范围；不恢复，保留暂停":"未参与监测，重新勾选并保存后复测；保留暂停";
     if(s?.runtime_error)return "修复监测服务后继续";
     if(!runtimeReady)return "等待重新连接，显示上次结果";
-    if(r.status==="external_change"||r.status==="pause_uncertain")return "检查调度变更，不自动恢复";
+    if(s?.accounts_error)return "等待账号范围同步；暂不恢复";
+    const account=accounts.find(a=>a.id===r.account_id);
+    if(!account)return "等待账号同步；已删除账号不会重建";
+    if(account.status!=="active")return "账号状态非 active，保留宿主状态";
+    if(r.status==="external_change"||r.status==="pause_uncertain")return s?.enabled?"等待插件复测；连续两轮通过后按恢复开关处理":"等待手动复测；连续两轮通过后按恢复开关处理";
     if(!s?.enabled)return "等待手动检测";
     if(r.hold&&r.recovery_passes>0&&!s.auto_recover)return "继续复测；自动恢复已关闭";
     return relativeTime(r.next_at)+(r.hold&&r.recovery_passes>0?"确认恢复":r.status==="unavailable"||r.status==="blocked"?"重试":r.hold?"复测":"检测");
@@ -191,7 +207,7 @@
     connection.dataset.tone=error?"warning":s?.monitoring_state==="running"?"good":"neutral";
     connection.textContent=!runtimeReady?"宿主状态不可用":s?.runtime_error?"监测服务异常":s?.connection?.state==="needs_credentials"?"等待连接管理端":s?.connection?.state==="stale"?"管理端状态已过期":modes[s?.monitoring_state]||(s?.enabled?"监测已启用":"监测未开启");
     $("freshness").textContent=lastRefresh?(runtimeReady?"已同步 · ":"上次同步 · ")+new Date(lastRefresh).toLocaleTimeString("zh-CN",{hour12:false}):"等待首次同步";
-    $("policySummary").textContent=s?.auto_pause?(s?.auto_recover?"指纹不符自动暂停 · 连续两轮通过后恢复":"指纹不符自动暂停 · 自动恢复已关闭"):s?.auto_recover?"不新增暂停 · 已有本插件暂停仍自动恢复":"只记录结果 · 不自动改变调度";
+    $("policySummary").textContent=s?.auto_pause?(s?.auto_recover?"指纹不符自动暂停 · 连续两轮通过后恢复":"指纹不符自动暂停 · 自动恢复已关闭"):s?.auto_recover?"不新增暂停 · 管理中暂停账号两轮通过后自动恢复":"只记录结果 · 不自动改变调度";
   }
   function setStale(error){
     runtimeReady=false;lastFetchError=error;updateControls();updateConnection(lastStatus);
@@ -261,7 +277,8 @@
     return "";
   }
   function updateFlow(){
-    const count=Array.from(drafts.values()).filter(t=>t.enabled).length;
+    const groupMode=groupIDs().length>0;
+    const count=groupMode?(lastStatus?.target_count||0):Array.from(drafts.values()).filter(t=>t.enabled).length;
     const hasConnection=!!lastStatus&&Object.prototype.hasOwnProperty.call(lastStatus,"connection");
     const checked=lastStatus?.accounts_checked_at;
     const legacyChecked=typeof checked==="string"&&!checked.startsWith("0001")&&Number.isFinite(Date.parse(checked))&&Date.parse(checked)>0;
@@ -275,11 +292,11 @@
     $("stepReview").dataset.current=String(step===3);
     $("stepConnectHint").textContent=connected?"管理端已连接":"填写地址与访问密钥";
     $("stepAccountsHint").textContent=count?`已选择 ${count} 个账号`:"使用推荐的检测设置";
-    $("startSetup").hidden=!onboarding;$("save").hidden=onboarding;$("runNow").hidden=onboarding;
-    $("startSetup").disabled=busy||manualBusy||batchBusy||!runtimeReady||!count||!connected||!!blocked;
+    $("startSetup").hidden=!onboarding;$("save").hidden=onboarding&&!groupMode;$("runNow").hidden=onboarding;
+    $("startSetup").disabled=busy||manualBusy||batchBusy||!runtimeReady||(!count&&!groupMode)||!connected||!!blocked;
     $("startSetup").title=blocked||(!connected?"先保存连接并验证管理端":"保存账号后开始首次检测");
     $("reviewSelection").hidden=!onboarding;
-    $("reviewSummary").textContent=count?`本次监测 ${count} 个账号，每轮至少 ${count*3} 次采样请求。${$("enabled").checked?"开启后后台定时巡检。":"定时巡检关闭，仅在点击检测时运行。"} ${$("auto_pause").checked?"确认指纹不符后自动暂停新调度。":"不新增自动暂停。"}${$("auto_recover").checked?"已有本插件暂停会继续自动复核恢复。":"已有暂停不会自动放行。"}`:"先选择账号，再确认是否开启自动处理。";
+    $("reviewSummary").textContent=groupMode?`按分组同步，当前 ${count} 个活动目标；新成员${$("group_model").value.trim()&&$("group_expected").value.trim()?"使用指定模板":"先等待配置"}。管理账号即使被外部暂停，也在两轮有效通过后按自动恢复开关处理；删除或移出分组不会恢复。`:count?`本次监测 ${count} 个账号，每轮至少 ${count*3} 次采样请求。${$("enabled").checked?"开启后后台定时巡检。":"定时巡检关闭，仅在点击检测时运行。"} ${$("auto_pause").checked?"确认指纹不符后自动暂停新调度。":"不新增自动暂停。"}${$("auto_recover").checked?"管理中的暂停账号会继续自动复核，连续两轮有效通过后恢复。":"已有暂停不会自动放行。"}`:"先选择账号，再确认是否开启自动处理。";
     $("timingSummary").textContent=`失败后 ${duration($("retry_seconds").value)}重试 · 暂停后每 ${duration($("quarantine_seconds").value)}复测`;
     const preset=String($("normal_seconds").value);$("intervalPreset").value=["1800","900","3600"].includes(preset)?preset:"custom";
     const guide=blocked||lastStatus?.connection?.next_action||lastStatus?.readiness?.next_action||"";
@@ -302,21 +319,26 @@
   function renderRun(s){
     const batch=s.batch,active=s.active_samples||(s.active_sample?[s.active_sample]:[]),running=!!s.batch_busy||active.length>0,run=s.state?.manual;
     $("runPanel").dataset.status=running?"running":s.manual_queued?"queued":s.enabled?"idle":"paused";
-    const connectionError=s.accounts_error||["error","stale","needs_credentials"].includes(s.connection?.state)||s.monitoring_state==="connection_error";
+    const connectionError=s.group_sync_error||s.accounts_error||["error","stale","needs_credentials"].includes(s.connection?.state)||s.monitoring_state==="connection_error";
     if(!runtimeReady||s.runtime_error||s.storage_error||connectionError){
       $("runPanel").dataset.status="error";$("runProgress").hidden=true;$("runCount").textContent="";
-      $("runTitle").textContent=!runtimeReady?"暂时无法同步状态":s.runtime_error?"监测服务需要修复":s.storage_error?"巡检记录暂时无法保存":s.connection?.state==="needs_credentials"?"先连接管理端":"管理连接需要处理";
-      $("runHint").textContent=!runtimeReady?(lastFetchError||"正在连接宿主，保留上次显示的结果。"):s.runtime_error||s.storage_error||s.connection?.next_action||s.accounts_error||"检查管理地址和密钥，再重新加载账号。";return;
+      $("runTitle").textContent=!runtimeReady?"暂时无法同步状态":s.runtime_error?"监测服务需要修复":s.storage_error?"巡检记录暂时无法保存":s.group_sync_error?"分组同步需要处理":s.connection?.state==="needs_credentials"?"先连接管理端":"管理连接需要处理";
+      $("runHint").textContent=!runtimeReady?(lastFetchError||"正在连接宿主，保留上次显示的结果。"):s.runtime_error||s.storage_error||s.group_sync_error||s.connection?.next_action||s.accounts_error||"检查管理地址和密钥，再重新加载账号。";return;
     }
     $("runProgress").hidden=!running;$("runCount").textContent="";
     if(running){const isManual=batch?.kind==="manual"||manualBusy&&!s.manual_queued;$("runTitle").textContent=isManual?"手动检测中":"自动检测中";$("runHint").textContent=`${batch?.active_ids?.length||active.length} 个账号并行${batch?.queued_ids?.length?` · ${batch.queued_ids.length} 个排队`:""}${s.manual_queued?" · 手动检测已排队":""}`;const total=batch?.total||run?.total||active.length,done=batch?.completed||run?.completed||0;$("runCount").textContent=`${done} / ${total}`;const progress=total?done/total:0;$("runFill").style.transform=`scaleX(${progress})`;$("runProgress").setAttribute("aria-valuenow",String(Math.round(progress*100)));return;}
     if(s.manual_queued||manualBusy){$("runTitle").textContent="检测已排队";$("runHint").textContent="等待当前任务完成后自动开始";return;}
+    const awaitingRetest=Object.values(s.state?.records||{}).filter(r=>activeTargets(s).some(t=>t.account_id===r.account_id&&t.enabled)&&accounts.some(a=>a.id===r.account_id&&a.status==="active")&&["external_change","pause_uncertain"].includes(r.status));
+    if(awaitingRetest.length){
+      $("runPanel").dataset.status="warning";$("runTitle").textContent="暂停账号待插件复测";
+      $("runHint").textContent=`${awaitingRetest.length} 个已启用管理的账号等待${s.enabled?"自动":"手动"}复测；旧保护记录不再锁死恢复，连续两轮有效通过后按自动恢复开关处理，不立即解除暂停。`;return;
+    }
     if(s.batch?.status==="completed_with_errors"||s.state?.manual?.status==="interrupted"||s.last_error){
       $("runPanel").dataset.status="warning";$("runTitle").textContent=s.state?.manual?.status==="interrupted"?"上次手动检测已中断":"部分账号需要重试";
       $("runHint").textContent=s.state?.manual?.status==="interrupted"?"服务重启中断了上次任务，可重新发起检测。":s.last_error||`本轮有 ${s.batch?.errors||0} 项未完成，已保留各账号结果，请查看下一步。`;return;
     }
     $("runTitle").textContent=!s.target_count?"选择账号后开始监测":s.enabled?"自动监测已开启":"自动监测已关闭";
-    const times=Object.values(s.state?.records||{}).filter(r=>configured.get(r.account_id)?.enabled&&(r.hold||accounts.find(a=>a.id===r.account_id)?.schedulable)).map(r=>new Date(r.next_at).getTime()).filter(n=>Number.isFinite(n)&&n>0);
+    const times=Object.values(s.state?.records||{}).filter(r=>activeTargets(s).some(t=>t.account_id===r.account_id&&t.enabled)).map(r=>new Date(r.next_at).getTime()).filter(n=>Number.isFinite(n)&&n>0);
     const ready=new Date(s.startup_ready_at||0).getTime(),next=times.length?Math.max(Math.min(...times),ready):ready;
     $("runHint").textContent=s.accounts_error?"账号列表同步失败，正在重试":!s.target_count?"打开管理账号，选择需要监测的账号":s.enabled?`下次检查${next>0?" · "+relativeTime(new Date(next).toISOString()):"自动排队"}`:"仍可手动检测已选择的账号";
   }
@@ -344,8 +366,9 @@
   $("refreshAccounts").onclick=()=>discover($("refreshAccounts"));
   $("diagnose").onclick=()=>discover($("diagnose"));
   async function saveConfig(){
+    if(!validateGroups())throw new Error("请修正分组或新成员模板配置");
     const draft=readConfig(),current=await send("config.load"),config={...(current.config||{})};
-    for(const key of [...bools,...strings,...nums,"targets"])if(JSON.stringify(draft[key])!==JSON.stringify(savedConfig[key]))config[key]=draft[key];
+    for(const key of [...bools,...strings,...nums,"targets","group_ids"])if(JSON.stringify(draft[key])!==JSON.stringify(savedConfig[key]))config[key]=draft[key];
     const r=await send("config.save",{config});fill(r.config||config);
   }
   $("configForm").onsubmit=async e=>{
@@ -358,8 +381,9 @@
   $("runNow").onclick=async()=>{
     if(busy||manualBusy||!runtimeReady||lastStatus?.runtime_error)return;
     if(!$("configForm").reportValidity())return;
+    if(!validateGroups())return;
     const draft=readConfig(),wasOnboarding=onboarding;
-    if(!draft.targets.some(t=>t.enabled)){message("请先勾选至少一个检测账号",true);$("accountSearch").focus();return;}
+    if(!draft.targets.some(t=>t.enabled)&&!draft.group_ids.length){message("请先勾选至少一个检测账号",true);$("accountSearch").focus();return;}
     busy=true;stateEpoch++;updateControls();
     try{
       if(dirty)await saveConfig();

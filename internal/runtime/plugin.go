@@ -22,30 +22,33 @@ import (
 const ID = "local.sub2api.account-guard"
 const Capability = "openai.oauth.outbound_transport.v1"
 
-var Version = "0.3.1"
+var Version = "0.3.2"
 
 type Plugin struct {
 	v1.UnimplementedTransportPluginServer
-	mu              sync.RWMutex
-	applyMu         sync.Mutex
-	detector        *fingerprint.Detector
-	broker          *hcplugin.GRPCBroker
-	host            v1.HostServiceClient
-	conn            *grpc.ClientConn
-	config          guard.Config
-	engine          *guard.Engine
-	cancel          context.CancelFunc
-	done            chan struct{}
-	pool            guard.ClientPool
-	accounts        []guard.AccountOption
-	accountsError   string
-	accountsLoading bool
-	accountsUpdated time.Time
-	accountsChecked time.Time
-	accountsEpoch   uint64
-	accountsRequest uint64
-	pendingManual   string
-	runtimeError    string
+	mu               sync.RWMutex
+	applyMu          sync.Mutex
+	discoveryMu      sync.Mutex
+	detector         *fingerprint.Detector
+	broker           *hcplugin.GRPCBroker
+	host             v1.HostServiceClient
+	conn             *grpc.ClientConn
+	config           guard.Config
+	engine           *guard.Engine
+	cancel           context.CancelFunc
+	done             chan struct{}
+	pool             guard.ClientPool
+	groupSyncPending []int64
+	groupSyncError   string
+	accounts         []guard.AccountOption
+	accountsError    string
+	accountsLoading  bool
+	accountsUpdated  time.Time
+	accountsChecked  time.Time
+	accountsEpoch    uint64
+	accountsRequest  uint64
+	pendingManual    string
+	runtimeError     string
 }
 
 func New() (*Plugin, error) {
@@ -106,7 +109,12 @@ func (p *Plugin) Health(context.Context, *v1.HealthRequest) (*v1.HealthResponse,
 	accounts := append([]guard.AccountOption{}, p.accounts...)
 	listError, loading, updated, checked := p.accountsError, p.accountsLoading, p.accountsUpdated, p.accountsChecked
 	pending, runtimeError := p.pendingManual, p.runtimeError
+	groupPending, groupError := append([]int64{}, p.groupSyncPending...), p.groupSyncError
 	p.mu.RUnlock()
+	configuredTargets := cfg.Targets
+	if e != nil {
+		cfg.Targets = e.ManagedTargets()
+	}
 	now := time.Now().UTC()
 	connection := connectionStatus(cfg, len(accounts), listError, loading, checked, updated, now)
 	bridge := inspectBridge(cfg.DataDir)
@@ -157,6 +165,10 @@ func (p *Plugin) Health(context.Context, *v1.HealthRequest) (*v1.HealthResponse,
 	status["detector_version"] = p.detector.Version()
 	status["target_count"] = count
 	status["targets"] = cfg.Targets
+	status["configured_targets"] = configuredTargets
+	status["group_ids"] = cfg.GroupIDs
+	status["group_sync_pending_ids"] = groupPending
+	status["group_sync_error"] = groupError
 	status["monitoring_state"] = mode
 	status["accounts"] = accounts
 	status["accounts_error"] = listError
@@ -186,6 +198,8 @@ func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, erro
 	}
 	p.mu.Unlock()
 	accounts, err := guard.NewAdmin(c).ListAccounts(ctx)
+	p.discoveryMu.Lock()
+	defer p.discoveryMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.config.AdminURL == c.AdminURL && p.config.AdminKey == c.AdminKey && p.accountsEpoch == epoch && p.accountsRequest == request {
@@ -196,12 +210,56 @@ func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, erro
 			return len(accounts), ctx.Err()
 		}
 		p.accountsChecked = time.Now().UTC()
+		base, current := c, p.config
+		base.ManualRequestID = ""
+		current.ManualRequestID = ""
+		syncGroups := len(c.GroupIDs) > 0 && reflect.DeepEqual(base, current)
 		if err != nil {
 			p.accountsError = err.Error()
+			if syncGroups {
+				engine := p.engine
+				p.mu.Unlock()
+				if engine != nil {
+					engine.SetGroupSyncBlocked(true)
+				}
+				p.mu.Lock()
+				if p.accountsEpoch == epoch && p.engine == engine {
+					p.groupSyncError = err.Error()
+				}
+			}
 		} else {
 			p.accounts = accounts
 			p.accountsError = ""
 			p.accountsUpdated = time.Now().UTC()
+			if syncGroups {
+				targets, pending, syncErr := guard.TargetsForGroups(c, accounts)
+				engine := p.engine
+				if syncErr == nil && engine != nil {
+					// Control paths may call back into host identity under p.mu.
+					// Never wait for an engine control lock while holding p.mu.
+					p.mu.Unlock()
+					syncErr = engine.UpdateManagedTargets(targets)
+					p.mu.Lock()
+				}
+				if p.accountsEpoch != epoch || p.engine != engine {
+					return len(accounts), err
+				}
+				if syncErr != nil {
+					p.mu.Unlock()
+					if engine != nil {
+						engine.SetGroupSyncBlocked(true)
+					}
+					p.mu.Lock()
+					if p.accountsEpoch != epoch || p.engine != engine {
+						return len(accounts), syncErr
+					}
+					p.groupSyncError = syncErr.Error()
+					return len(accounts), syncErr
+				} else {
+					p.groupSyncError = ""
+					p.groupSyncPending = pending
+				}
+			}
 		}
 	}
 	return len(accounts), err
@@ -338,6 +396,8 @@ func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 	p.done = done
 	p.runtimeError = ""
 	p.accountsEpoch++
+	p.groupSyncPending = nil
+	p.groupSyncError = ""
 	p.accountsLoading = strings.TrimSpace(c.AdminKey) != ""
 	if !sameConnection {
 		p.accounts = []guard.AccountOption{}
@@ -454,6 +514,8 @@ func (p *Plugin) Close() {
 	p.conn = nil
 	p.pendingManual = ""
 	p.accountsEpoch++
+	p.groupSyncPending = nil
+	p.groupSyncError = ""
 	p.accountsLoading = false
 	p.mu.Unlock()
 }

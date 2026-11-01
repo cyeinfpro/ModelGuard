@@ -103,28 +103,54 @@ func TestPauseAndAutomaticRecoveryEndToEnd(t *testing.T) {
 		t.Fatal("two-pass automatic recovery failed")
 	}
 }
-func TestExternalPauseIsNeverAdoptedOrRecovered(t *testing.T) {
+func TestManagedExternalPauseRequiresTwoPasses(t *testing.T) {
 	e, a, v, calls := fixture(t)
 	*v = "match"
 	a.account.Schedulable = false
-	for i := 0; i < 5; i++ {
-		tick(t, e)
+	tick(t, e)
+	if a.resumes != 0 || !e.Store.State.Records[1].Hold {
+		t.Fatal("must retain pause until two rounds")
 	}
-	if a.pauses != 0 || a.resumes != 0 || *calls != 0 {
-		t.Fatal("external pause touched")
+	a.account.UpdatedAt = "background-update"
+	tick(t, e)
+	if a.resumes != 1 || !a.account.Schedulable || *calls != 2 {
+		t.Fatal("managed pause not recovered after two matches")
 	}
 }
-func TestExternalEditBlocksAutomaticRecovery(t *testing.T) {
-	e, a, v, _ := fixture(t)
-	for i := 0; i < 3; i++ {
-		tick(t, e)
+func TestLegacyProtectionMigratesWithTwoFreshPasses(t *testing.T) {
+	for _, status := range []string{"external_change", "pause_uncertain"} {
+		t.Run(status, func(t *testing.T) {
+			e, a, v, calls := fixture(t)
+			tick(t, e)
+			*v = "match"
+			r := e.Store.State.Records[1]
+			r.Status = status
+			r.PauseUpdatedAt = ""
+			r.RecoveryPasses = 1
+			before := *calls
+			tick(t, e)
+			if a.resumes != 0 || r.RecoveryPasses != 1 {
+				t.Fatal("legacy pass count trusted")
+			}
+			a.account.UpdatedAt = "new-background-update"
+			tick(t, e)
+			if a.resumes != 1 || *calls-before != 2 || r.Hold {
+				t.Fatal("legacy hold not recovered")
+			}
+		})
 	}
+}
+func TestManagedReadFailureNeverRestores(t *testing.T) {
+	e, a, v, _ := fixture(t)
+	tick(t, e)
 	*v = "match"
 	tick(t, e)
-	a.account.UpdatedAt = "human-edit"
-	tick(t, e)
-	if a.resumes != 0 || e.Store.State.Records[1].Status != "external_change" {
-		t.Fatal("external edit overwritten")
+	a.err = errors.New("account not found or denied")
+	if err := e.Tick(context.Background(), time.Now().Add(24*time.Hour)); err == nil {
+		t.Fatal("read error swallowed")
+	}
+	if a.resumes != 0 || e.Store.State.Records[1].RecoveryPasses != 0 {
+		t.Fatal("read error authorized recovery")
 	}
 }
 func TestUnavailableNeverIsolatesEvenWithLegacyOptIn(t *testing.T) {
@@ -192,16 +218,18 @@ func TestObservationModeNeverWrites(t *testing.T) {
 		t.Fatal("observation mode mutated scheduling")
 	}
 }
-func TestInterruptedPauseHasNoRecoveryOwnership(t *testing.T) {
-	e, a, v, _ := fixture(t)
-	e.Store.State.Records[1] = &Record{AccountID: 1, Model: "gpt-6.1-terra", Expected: "gpt-6.1-terra", Pending: true}
+func TestInterruptedPauseReconcilesBeforeTwoFreshPasses(t *testing.T) {
+	e, a, v, calls := fixture(t)
+	e.Store.State.Records[1] = &Record{AccountID: 1, Model: "gpt-6.1-terra", Expected: "gpt-6.1-terra", Pending: true, RecoveryPasses: 1}
 	a.account.Schedulable = false
 	*v = "match"
-	for i := 0; i < 4; i++ {
-		tick(t, e)
+	tick(t, e)
+	if a.resumes != 0 || !e.Store.State.Records[1].Hold || e.Store.State.Records[1].Pending {
+		t.Fatal("pending did not reconcile safely")
 	}
-	if a.resumes != 0 || !e.Store.State.Records[1].Hold {
-		t.Fatal("ambiguous pause gained recovery ownership")
+	tick(t, e)
+	if a.resumes != 1 || *calls != 2 || a.pauses != 0 || e.Store.State.Records[1].Hold {
+		t.Fatal("reconciled pause did not require two fresh passes")
 	}
 }
 func TestControlPlaneErrorDoesNotBecomeQualityFailure(t *testing.T) {
@@ -358,5 +386,52 @@ func TestOAuthProbePinsIdentityAndCustomChallenge(t *testing.T) {
 	}
 	if len(connections) != 2 || connections[0] == connections[1] {
 		t.Fatal("fingerprint samples reused upstream connection")
+	}
+}
+
+func TestDeletionDuringSecondRoundNeverWritesRecovery(t *testing.T) {
+	e, a, v, _ := fixture(t)
+	tick(t, e)
+	*v = "match"
+	tick(t, e)
+	e.Evaluate = func(context.Context, Account, Target) (*fingerprint.Analysis, string, error) {
+		a.mu.Lock()
+		a.err = errors.New("Sub2API 管理接口 HTTP 404")
+		a.mu.Unlock()
+		return &fingerprint.Analysis{Decision: "match", Used: 3}, "match", nil
+	}
+	e.Store.State.Records[1].NextAt = time.Time{}
+	if err := e.Tick(context.Background(), time.Now()); err == nil {
+		t.Fatal("deleted account was accepted")
+	}
+	if a.resumes != 0 || !e.Store.State.Records[1].Hold {
+		t.Fatal("deleted account was restored")
+	}
+	// A later read failure must not trigger another write or preserve usable passes.
+	e.Store.State.Records[1].NextAt = time.Time{}
+	_ = e.Tick(context.Background(), time.Now())
+	if a.resumes != 0 || e.Store.State.Records[1].RecoveryPasses != 0 {
+		t.Fatal("failed read reused pass count")
+	}
+}
+
+func TestInactiveAccountBreaksConsecutiveRecovery(t *testing.T) {
+	e, a, v, _ := fixture(t)
+	tick(t, e)
+	*v = "match"
+	tick(t, e)
+	a.account.Status = "disabled"
+	tick(t, e)
+	if a.resumes != 0 || e.Store.State.Records[1].RecoveryPasses != 0 {
+		t.Fatal("inactive account retained usable pass")
+	}
+	a.account.Status = "active"
+	tick(t, e)
+	if a.resumes != 0 {
+		t.Fatal("recovered with only one fresh round")
+	}
+	tick(t, e)
+	if a.resumes != 1 {
+		t.Fatal("did not recover after two fresh rounds")
 	}
 }

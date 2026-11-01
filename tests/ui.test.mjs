@@ -12,6 +12,35 @@ async function setup(options={}){
  const host={postMessage(m){calls.push(m);if(!['config.load','config.save','config.test','plugin.status'].includes(m.type))return;const response={source:'sub2api-plugin-host',bridge_token:'token',request_id:m.request_id,ok:true};if(m.type==='config.load')response.config=config;else if(m.type==='config.save'){Object.assign(config,m.config);response.config=config;}else if(m.type==='config.test'){if(config.manual_request_id){state.manual_busy=true;response.result={success:true,message:'检测已开始',status_json:JSON.stringify(state)};}else response.result={success:true,message:'连接正常',status_json:JSON.stringify({...state,diagnostic:{kind:'connection'}})};}else response.result={status_json:JSON.stringify(state)};const deliver=()=>w.dispatchEvent(new w.MessageEvent('message',{source:host,data:response}));if(options.respond?.({m,response,config,state,w,deliver})!==false)queueMicrotask(deliver);}};
  Object.defineProperty(w,'parent',{value:host});w.eval(js);await tick();return {dom,w,calls,host,state,config};
 }
+test('legacy holds return to retesting without claiming immediate recovery',async()=>{
+ for(const status of ['external_change','pause_uncertain']){
+  const {dom,w,state,calls}=await setup();
+  state.state.records[1]={account_id:1,status,hold:true,reason:'old reason'};
+  state.last_error='old reason';state.batch={status:'completed_with_errors',errors:1};
+  w.document.getElementById('refresh').click();await tick();
+  assert.equal(w.document.getElementById('runTitle').textContent,'暂停账号待插件复测');
+  assert.match(w.document.getElementById('runHint').textContent,/1 个.*连续两轮有效通过.*不立即解除暂停/);
+  assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/等待插件复测/);
+  assert.equal(calls.filter(c=>c.type==='config.save'||c.type==='config.test').length,0);
+  state.enabled=false;w.document.getElementById('refresh').click();await tick();
+  assert.match(w.document.getElementById('runHint').textContent,/手动复测/);
+  state.active_samples=[{account_id:1,index:1,phase:'output'}];state.batch_busy=true;
+  w.document.getElementById('refresh').click();await tick();
+  assert.equal(w.document.getElementById('runTitle').textContent,'自动检测中');
+  dom.window.close();
+ }
+});
+test('external pauses on enabled targets are eligible for managed retesting',async()=>{
+ const {dom,w,state}=await setup();
+ state.accounts[0].schedulable=false;state.state.records[1]={account_id:1,status:'paused_observation',hold:false};
+ w.document.getElementById('refresh').click();await tick();
+ assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/待插件复测.*两轮通过/);
+ state.accounts[0].status='disabled';w.document.getElementById('refresh').click();await tick();
+ assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/非 active.*保留宿主状态/);
+ state.accounts=[];w.document.getElementById('refresh').click();await tick();
+ assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/已删除账号不会重建/);
+ dom.window.close();
+});
 test('bridge loads native config and renders status without interpreting upstream HTML',async()=>{const {dom,w,calls}=await setup();assert.equal(w.document.getElementById('auto_recover').checked,true);assert.equal(w.document.getElementById('holdCount').textContent,'1');assert.equal(w.document.querySelectorAll('#records img').length,0);assert.match(w.document.getElementById('records').textContent,/<img src=x/);assert(calls.some(x=>x.type==='plugin.status'));assert(calls.some(x=>x.type==='config.load'));dom.window.close();});
 test('saving preserves explicit targets and automatic recovery policy',async()=>{const {dom,w,calls}=await setup();w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();const m=calls.find(x=>x.type==='config.save');assert.equal(m.config.auto_recover,true);assert.equal(m.config.targets[0].account_id,1);assert.equal(m.config.admin_key,'test-secret');assert(!w.document.getElementById('records').textContent.includes('test-secret'));dom.window.close();});
 test('diagnostics uses config.test rather than probes or direct admin fetch',async()=>{const {dom,w,calls}=await setup();w.document.getElementById('diagnose').click();await tick();assert.equal(calls.filter(x=>x.type==='config.test').length,1);assert.equal(w.document.getElementById('message').textContent,'连接正常');assert(!js.includes('fetch('));dom.window.close();});
@@ -218,7 +247,7 @@ test('interrupted work and partial failures offer truthful recovery state',async
 });
 test('independent recovery setting is explained when new automatic pauses are disabled',async()=>{
  const {dom,w,state}=await setup();state.auto_pause=false;state.auto_recover=true;w.document.getElementById('refresh').click();await tick();
- assert.match(w.document.getElementById('policySummary').textContent,/不新增暂停.*已有本插件暂停仍自动恢复/);
+ assert.match(w.document.getElementById('policySummary').textContent,/不新增暂停.*管理中暂停账号两轮通过后自动恢复/);
  dom.window.close();
 });
 
@@ -278,5 +307,55 @@ test('an owned hold removed from saved monitoring never promises an automatic re
  w.document.getElementById('refresh').click();await tick();
  const next=w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent;
  assert.match(next,/未参与监测.*重新勾选并保存后复测.*保留暂停/);assert(!next.includes('小时后'));assert(!next.includes('确认恢复'));
+ dom.window.close();
+});
+
+test('group config saves explicit IDs and templates without persisting dynamic targets',async()=>{
+ const manual={account_id:1,enabled:true,model:'gpt-6.1-terra',expected:'gpt-6.1-terra'};
+ const dynamic={account_id:2,enabled:true,model:'gpt-6.1-sol',expected:'gpt-6-astra'};
+ const {dom,w,state,calls}=await setup({config:{group_ids:[12],group_model:'gpt-6.1-sol',group_expected:'gpt-6-astra',targets:[manual]},state:{targets:[dynamic],configured_targets:[manual],group_sync_pending_ids:[3]}});
+ assert.match(w.document.getElementById('groupSyncStatus').textContent,/新成员等待配置：3/);
+ assert(w.document.querySelector('#records tr[data-account-id="2"]'));
+ assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/不在当前管理范围.*不恢复/);
+ const input=w.document.getElementById('group_ids');input.value='12, 34 56';input.dispatchEvent(new w.Event('input',{bubbles:true}));
+ state.targets=[];w.document.getElementById('refresh').click();await tick();
+ assert.equal(input.value,'12, 34 56','refresh preserves group draft');
+ w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();
+ const save=calls.find(c=>c.type==='config.save');
+ assert.deepEqual(Array.from(save.config.group_ids),[12,34,56]);assert.equal(save.config.group_model,'gpt-6.1-sol');
+ assert.deepEqual(Array.from(save.config.targets,t=>t.account_id),[1],'effective group members are never saved as manual configuration');
+ dom.window.close();
+});
+test('group validation rejects invalid IDs and partial templates without host writes',async()=>{
+ for(const invalid of ['0','12,12','9007199254740992']){
+  const {dom,w,calls}=await setup();w.document.getElementById('group_ids').value=invalid;
+  w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();
+  assert.equal(calls.filter(c=>c.type==='config.save').length,0);assert.match(w.document.getElementById('message').textContent,/分组/);dom.window.close();
+ }
+ const {dom,w,calls}=await setup();w.document.getElementById('group_ids').value='12';w.document.getElementById('group_model').value='model-only';
+ w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();
+ assert.equal(calls.filter(c=>c.type==='config.save').length,0);dom.window.close();
+});
+
+test('group-only onboarding can save without sampling and discard clears template drafts',async()=>{
+ const {dom,w,calls}=await setup({config:{targets:[]},state:{target_count:0,targets:[],configured_targets:[]}});
+ const ids=w.document.getElementById('group_ids');ids.value='12';ids.dispatchEvent(new w.Event('input',{bubbles:true}));
+ assert.equal(w.document.getElementById('save').hidden,false);
+ w.document.getElementById('group_model').value='draft';w.document.getElementById('group_expected').value='draft';
+ w.document.getElementById('discard').click();
+ assert.equal(ids.value,'');assert.equal(w.document.getElementById('group_model').value,'');assert.equal(w.document.getElementById('group_expected').value,'');
+ assert.equal(calls.filter(c=>c.type==='config.save'||c.type==='config.test').length,0);
+ dom.window.close();
+});
+
+test('group sync errors cannot appear as a ready recovery despite healthy connection',async()=>{
+ const {dom,w,state}=await setup({config:{group_ids:[12]},state:{group_ids:[12],connection:{state:'ready'},group_sync_error:'宿主缺少分组元数据',targets:[{account_id:1,enabled:true}],configured_targets:[{account_id:1,enabled:true}]}});
+ assert.equal(w.document.getElementById('runTitle').textContent,'分组同步需要处理');
+ assert.match(w.document.getElementById('groupSyncStatus').textContent,/同步未确认/);
+ assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/等待分组同步确认.*暂不恢复/);
+ state.group_ids=[34];state.group_sync_error='';state.targets=[];
+ w.document.getElementById('refresh').click();await tick();
+ assert.equal(w.document.getElementById('group_ids').value,'34');
+ assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/不在当前管理范围.*不恢复/);
  dom.window.close();
 });

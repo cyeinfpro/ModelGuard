@@ -59,12 +59,8 @@ func TestScopedMetadataPauseRecoverAndExternalEdit(t *testing.T) {
 				mu.Unlock()
 			}
 			tick(t, e)
-			if external {
-				if writes != 1 || e.Store.State.Records[1].Status != "external_change" {
-					t.Fatal("overwrote external update")
-				}
-			} else if writes != 2 || e.Store.State.Records[1].Hold {
-				t.Fatal("did not restore after two matches")
+			if writes != 2 || e.Store.State.Records[1].Hold {
+				t.Fatal("managed account not restored after two matches")
 			}
 		})
 	}
@@ -87,5 +83,57 @@ func TestRevisionTimezoneAndMissing(t *testing.T) {
 	}
 	if sameRevision("", "") || sameRevision("x", "") || sameRevision("2026-10-30T10:57:34Z", "2026-10-30T10:57:33Z") {
 		t.Fatal("missing/different revision accepted")
+	}
+}
+
+func TestSparseSchedulingReceiptUsesScopedAccountType(t *testing.T) {
+	for _, denyRead := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "post-success-read-denied"}[denyRead], func(t *testing.T) {
+			writes, reads, enrich := 0, 0, 0
+			scheduled := true
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "POST" {
+					writes++
+					var body struct {
+						Schedulable bool `json:"schedulable"`
+					}
+					json.NewDecoder(r.Body).Decode(&body)
+					scheduled = body.Schedulable
+					json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"id": 1, "status": "active"}})
+					return
+				}
+				reads++
+				if denyRead {
+					w.WriteHeader(403)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": Account{ID: 1, Type: "apikey", Platform: "openai", Status: "active", Schedulable: scheduled}})
+			}))
+			defer server.Close()
+			c := DefaultConfig()
+			c.AdminURL = server.URL
+			admin := NewAdmin(c)
+			admin.Enrich = func(_ context.Context, a *Account) error {
+				enrich++
+				if a.Type != "apikey" {
+					t.Fatal("inferred OAuth from sparse receipt")
+				}
+				a.UpdatedAt = "revision"
+				return nil
+			}
+			_, err := admin.Pause(context.Background(), 1)
+			if (err != nil) != denyRead || writes != 1 || reads != 1 {
+				t.Fatal("unexpected confirmation or repeated POST", err, writes, reads)
+			}
+			if denyRead && enrich != 0 {
+				t.Fatal("bypassed denied scoped read")
+			}
+			if !denyRead {
+				a, err := admin.Resume(context.Background(), 1)
+				if err != nil || !a.Schedulable || writes != 2 || reads != 2 {
+					t.Fatal("resume not confirmed", err)
+				}
+			}
+		})
 	}
 }

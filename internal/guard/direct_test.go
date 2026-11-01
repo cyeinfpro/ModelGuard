@@ -64,20 +64,23 @@ func TestUnsupportedAccountNeverProbedOrPaused(t *testing.T) {
 	}
 }
 
-func TestManualObservesExternalPauseWithoutAdopting(t *testing.T) {
+func TestManualManagedPauseUsesSameTwoPassRule(t *testing.T) {
 	for _, verdict := range []string{"match", "mismatch", "indeterminate"} {
 		t.Run(verdict, func(t *testing.T) {
 			e, a, v, calls := fixture(t)
 			*v = verdict
 			a.account.Schedulable = false
-			for i := 0; i < 4; i++ {
+			for i := 0; i < 2; i++ {
 				if err := e.tickTargets(context.Background(), time.Now(), e.Config.Targets, true); err != nil {
 					t.Fatal(err)
 				}
 			}
-			r := e.Store.State.Records[1]
-			if *calls != 4 || a.pauses != 0 || a.resumes != 0 || a.account.Schedulable || r.Hold || r.RecoveryPasses != 0 || r.Failures != 0 || r.Unavailable != 0 || r.CheckedAt.IsZero() || r.Status != "paused_observation" {
-				t.Fatal("manual observation changed scheduling or failed to sample")
+			want := 0
+			if verdict == "match" {
+				want = 1
+			}
+			if *calls != 2 || a.pauses != 0 || a.resumes != want {
+				t.Fatal("manual management verdict not enforced")
 			}
 		})
 	}

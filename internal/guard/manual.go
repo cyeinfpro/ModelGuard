@@ -22,7 +22,7 @@ func (e *Engine) RequestManual(id string) error {
 		return errors.New("此检测请求已处理，请重新点击立即检测")
 	}
 	count := 0
-	for _, t := range e.Config.Targets {
+	for _, t := range e.targetsLocked() {
 		if t.Enabled {
 			count++
 		}
@@ -59,7 +59,7 @@ func (e *Engine) runManual(ctx context.Context, id string) {
 	if queued := e.Store.State.Manual; queued != nil && queued.ID == id && queued.Status == "queued" {
 		run.RequestedAt = queued.RequestedAt
 	}
-	for _, t := range e.Config.Targets {
+	for _, t := range e.targetsLocked() {
 		if t.Enabled {
 			run.Total++
 		}
@@ -75,7 +75,7 @@ func (e *Engine) runManual(ctx context.Context, id string) {
 	}
 	e.publishLocked("")
 	e.stateMu.Unlock()
-	batchErr := e.runTargets(ctx, time.Now().UTC(), e.Config.Targets, true, func(t Target) {
+	batchErr := e.runTargets(ctx, time.Now().UTC(), e.ManagedTargets(), true, func(t Target) {
 		e.stateMu.Lock()
 		defer e.stateMu.Unlock()
 		run.CurrentIDs = append(run.CurrentIDs, t.AccountID)

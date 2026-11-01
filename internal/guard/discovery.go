@@ -10,14 +10,15 @@ import (
 // Only these public fields leave discovery. Never include credentials, proxy
 // passwords or arbitrary account metadata in plugin status / iframe messages.
 type AccountOption struct {
-	ID                int64  `json:"id"`
-	Name              string `json:"name"`
-	Type              string `json:"type"`
-	Status            string `json:"status"`
-	Schedulable       bool   `json:"schedulable"`
-	Supported         bool   `json:"supported"`
-	SuggestedModel    string `json:"suggested_model"`
-	SuggestedExpected string `json:"suggested_expected"`
+	GroupIDs          []int64 `json:"group_ids"`
+	ID                int64   `json:"id"`
+	Name              string  `json:"name"`
+	Type              string  `json:"type"`
+	Status            string  `json:"status"`
+	Schedulable       bool    `json:"schedulable"`
+	Supported         bool    `json:"supported"`
+	SuggestedModel    string  `json:"suggested_model"`
+	SuggestedExpected string  `json:"suggested_expected"`
 }
 
 func (a *AdminClient) ListAccounts(ctx context.Context) ([]AccountOption, error) {
@@ -26,27 +27,35 @@ func (a *AdminClient) ListAccounts(ctx context.Context) ([]AccountOption, error)
 	}
 	out := []AccountOption{}
 	seen := map[int64]bool{}
+	expectedTotal := -1
 	for page := 1; page <= 100; page++ {
 		var data struct {
 			Items []struct {
-				ID          int64  `json:"id"`
-				Name        string `json:"name"`
-				Platform    string `json:"platform"`
-				Type        string `json:"type"`
-				Status      string `json:"status"`
-				Schedulable bool   `json:"schedulable"`
-				ParentID    *int64 `json:"parent_account_id"`
+				GroupIDs    []int64 `json:"group_ids"`
+				ID          int64   `json:"id"`
+				Name        string  `json:"name"`
+				Platform    string  `json:"platform"`
+				Type        string  `json:"type"`
+				Status      string  `json:"status"`
+				Schedulable bool    `json:"schedulable"`
+				ParentID    *int64  `json:"parent_account_id"`
 			} `json:"items"`
-			Total int `json:"total"`
-			Pages int `json:"pages"`
-			Page  int `json:"page"`
+			Total *int `json:"total"`
+			Pages int  `json:"pages"`
+			Page  int  `json:"page"`
 		}
 		path := fmt.Sprintf("/api/v1/admin/accounts?platform=openai&page=%d&page_size=100&sort_by=id&sort_order=asc", page)
 		if err := a.call(ctx, "GET", path, nil, &data); err != nil {
 			return nil, err
 		}
-		if data.Page != page || data.Total < 0 || data.Items == nil {
+		if data.Page != page || data.Total == nil || *data.Total < 0 || data.Items == nil {
 			return nil, errors.New("账号列表分页格式不兼容")
+		}
+		if expectedTotal < 0 {
+			expectedTotal = *data.Total
+		}
+		if *data.Total != expectedTotal {
+			return nil, errors.New("账号分页总数变化；保留原监测目标")
 		}
 		for _, x := range data.Items {
 			if x.ID <= 0 || seen[x.ID] {
@@ -56,14 +65,17 @@ func (a *AdminClient) ListAccounts(ctx context.Context) ([]AccountOption, error)
 			if x.Platform != "openai" {
 				continue
 			}
-			option := AccountOption{ID: x.ID, Name: x.Name, Type: x.Type, Status: x.Status, Schedulable: x.Schedulable, Supported: x.ParentID == nil && (x.Type == "oauth" || x.Type == "apikey"), SuggestedModel: "gpt-6.1-terra", SuggestedExpected: "gpt-6.1-terra"}
+			option := AccountOption{GroupIDs: x.GroupIDs, ID: x.ID, Name: x.Name, Type: x.Type, Status: x.Status, Schedulable: x.Schedulable, Supported: x.ParentID == nil && (x.Type == "oauth" || x.Type == "apikey"), SuggestedModel: "gpt-6.1-terra", SuggestedExpected: "gpt-6.1-terra"}
 			if x.Type == "apikey" {
 				option.SuggestedModel = "gpt-6.1-sol"
 				option.SuggestedExpected = "gpt-6-astra"
 			}
 			out = append(out, option)
 		}
-		if len(seen) >= data.Total {
+		if len(seen) > *data.Total {
+			return nil, errors.New("账号分页数量超出总数")
+		}
+		if len(seen) == *data.Total {
 			sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 			return out, nil
 		}

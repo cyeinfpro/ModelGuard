@@ -20,6 +20,9 @@ type Target struct {
 	Enabled   bool   `json:"enabled"`
 }
 type Config struct {
+	GroupIDs          []int64  `json:"group_ids,omitempty"`
+	GroupModel        string   `json:"group_model,omitempty"`
+	GroupExpected     string   `json:"group_expected,omitempty"`
 	Concurrency       int      `json:"concurrency"`
 	TestKey           string   `json:"test_key,omitempty"`
 	ManualRequestID   string   `json:"manual_request_id,omitempty"`
@@ -80,6 +83,27 @@ func ParseConfig(raw []byte, detector *fingerprint.Detector) (Config, error) {
 	}
 	if len(c.Targets) > 100 {
 		return c, errors.New("最多配置 100 个账号")
+	}
+	if len(c.GroupIDs) > 100 {
+		return c, errors.New("最多配置 100 个分组")
+	}
+	groups := map[int64]bool{}
+	for _, id := range c.GroupIDs {
+		if id <= 0 || groups[id] {
+			return c, errors.New("分组 ID 必须为唯一正整数")
+		}
+		groups[id] = true
+	}
+	if (c.GroupModel == "") != (c.GroupExpected == "") {
+		return c, errors.New("分组新成员模型和预期模型必须同时配置")
+	}
+	if c.GroupModel != "" {
+		if strings.TrimSpace(c.GroupModel) == "" || len(c.GroupModel) > 160 {
+			return c, errors.New("分组模型无效")
+		}
+		if _, ok := detector.ResolveExpected(c.GroupExpected); !ok {
+			return c, errors.New("分组预期模型不在指纹库中")
+		}
 	}
 	seen := map[int64]bool{}
 	for _, t := range c.Targets {

@@ -13,11 +13,16 @@ import (
 )
 
 type Engine struct {
-	stateMu          sync.Mutex // guards records, progress, budget reservations and durable writes
-	batchMu          sync.Mutex // manual and scheduled batches share the same worker limit
-	activeSamples    map[int64]*ActiveSample
-	inFlight         map[int64]bool
-	reservedRequests int
+	stateMu           sync.Mutex // guards records, progress, budget reservations and durable writes
+	batchMu           sync.Mutex // manual and scheduled batches share the same worker limit
+	activeSamples     map[int64]*ActiveSample
+	inFlight          map[int64]bool
+	reservedRequests  int
+	controlMu         sync.Mutex
+	managedTargets    []Target
+	managedTargetsSet bool
+	targetGenerations map[int64]uint64
+	groupSyncBlocked  bool
 
 	activeSample *ActiveSample
 	Config       Config
@@ -129,7 +134,7 @@ func (e *Engine) clearLastErrorLocked() {
 	if e.storageError != "" {
 		return
 	}
-	for _, target := range e.Config.Targets {
+	for _, target := range e.targetsLocked() {
 		if !target.Enabled {
 			continue
 		}
@@ -207,7 +212,7 @@ func (e *Engine) Tick(ctx context.Context, now time.Time) error {
 	if !c.Enabled {
 		return nil
 	}
-	return e.runTargets(ctx, now, c.Targets, false, nil, nil)
+	return e.runTargets(ctx, now, e.ManagedTargets(), false, nil, nil)
 }
 func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Target, force bool) error {
 	e.stateMu.Lock()
@@ -226,9 +231,20 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		return a.NextAt.Before(b.NextAt)
 	})
 	for _, t := range targets {
-		if !t.Enabled {
+		if !t.Enabled || !e.targetEnabledLocked(t.AccountID) {
 			continue
 		}
+		currentTarget := false
+		for _, current := range e.targetsLocked() {
+			if current == t {
+				currentTarget = true
+				break
+			}
+		}
+		if !currentTarget {
+			continue
+		}
+		generation := e.targetGenerationLocked(t.AccountID)
 		r := e.Store.State.Records[t.AccountID]
 		if r == nil {
 			r = &Record{AccountID: t.AccountID, Model: t.Model, Expected: t.Expected, Status: "unverified"}
@@ -263,6 +279,9 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		e.stateMu.Unlock()
 		a, err := e.Admin.Account(ctx, t.AccountID)
 		e.stateMu.Lock()
+		if !e.targetEnabledLocked(t.AccountID) || generation != e.targetGenerationLocked(t.AccountID) {
+			return e.save()
+		}
 		if err != nil {
 			r.RecoveryPasses = 0
 			r.Status = "blocked"
@@ -274,24 +293,15 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		}
 		if a.Platform != "openai" || (a.Type != "oauth" && a.Type != "apikey") || a.ParentID != nil {
 			r.Status = "unsupported"
+			r.RecoveryPasses = 0
 			r.Reason = "仅支持独立 OpenAI OAuth 或 API Key 账号"
 			return e.save()
 		}
 		if r.Pending {
 			r.Pending = false
-			if !a.Schedulable {
-				r.Hold = true
-				r.PauseUpdatedAt = ""
-				r.Status = "pause_uncertain"
-				r.Reason = "先前暂停回执不确定；禁止自动恢复以免覆盖外部停用"
-			} else {
-				r.Failures = 0
-				r.Unavailable = 0
-				r.Status = "unverified"
-				r.Reason = "先前暂停未生效，重新采样"
-			}
+			r.RecoveryPasses = 0
+			r.Reason = "已重新读取调度状态，继续由插件管理"
 			e.Store.Event(a.ID, "reconcile", r.Reason, now)
-			return e.save()
 		}
 		if r.Hold && a.Schedulable {
 			r.Hold = false
@@ -303,19 +313,22 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		}
 		if a.Status != "active" || (a.ExpiresAt != nil && !now.Before(*a.ExpiresAt)) {
 			r.Status = "skipped"
+			r.RecoveryPasses = 0
 			r.Reason = "账号非 active 或已过期"
 			return e.save()
 		}
-		if !a.Schedulable && !r.Hold && !force {
-			r.Status = "skipped"
-			r.Reason = "账号已被外部暂停，插件不接管"
-			return e.save()
-		}
-		if r.Hold && (!sameRevision(a.UpdatedAt, r.PauseUpdatedAt)) {
-			r.Status = "external_change"
-			r.Reason = "隔离后账号被外部更新，停止自动恢复"
-			r.NextAt = now.Add(time.Duration(c.QuarantineSeconds) * time.Second)
-			return e.save()
+		// Enabled targets are explicitly managed by the plugin. General account
+		// updates and external scheduling pauses do not revoke that authority.
+		// Legacy uncertain/external-change holds require two fresh valid rounds.
+		if !a.Schedulable && (!r.Hold || r.Status == "external_change" || r.Status == "pause_uncertain") {
+			r.Hold = true
+			r.RecoveryPasses = 0
+			r.Status = "quarantined"
+			r.Reason = "账号已纳入插件暂停管理，连续两轮有效通过后恢复"
+			e.Store.Event(a.ID, "managed_pause", r.Reason, now)
+			if err := e.save(); err != nil {
+				return err
+			}
 		}
 		// Do not spend the remainder on a round that cannot collect all three samples.
 		used := 0
@@ -339,6 +352,9 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		reserve := func(retry bool) error {
 			e.stateMu.Lock()
 			defer e.stateMu.Unlock()
+			if !e.targetEnabledLocked(t.AccountID) || generation != e.targetGenerationLocked(t.AccountID) {
+				return errors.New("账号已移出监测范围，停止后续采样")
+			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -368,6 +384,9 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		}
 		e.stateMu.Lock()
 		e.reservedRequests -= remaining
+		if !e.targetEnabledLocked(t.AccountID) || generation != e.targetGenerationLocked(t.AccountID) {
+			return e.save()
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -392,26 +411,16 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 		}
 		r.Analysis = analysis
 		done := time.Now().UTC()
-		// An explicit manual run may observe an externally paused account.
-		// It never adopts the hold, advances recovery, or changes scheduling.
-		if !a.Schedulable && !r.Hold {
-			r.CheckedAt = done
-			r.Status = "paused_observation"
-			r.Reason = "外部暂停，仅复测：" + reason
-			r.NextAt = done.Add(time.Duration(c.NormalSeconds) * time.Second)
-			e.Store.Event(a.ID, "observe_paused", fmt.Sprintf("%s: %s", verdict, r.Reason), done)
-			return e.save()
-		}
 		pause := Transition(r, verdict, reason, done, c)
 		e.Store.Event(a.ID, "check", fmt.Sprintf("%s: %s", verdict, reason), done)
 		if err = e.save(); err != nil {
 			return err
 		}
 		if pause {
-			return e.pause(ctx, a, r, done)
+			return e.pause(ctx, a, r, done, generation)
 		}
 		if r.Hold && r.RecoveryPasses >= 2 && c.AutoRecover {
-			return e.recover(ctx, r, done)
+			return e.recover(ctx, r, done, generation)
 		}
 		return nil
 	}
@@ -420,7 +429,14 @@ func (e *Engine) tickTargets(ctx context.Context, now time.Time, selected []Targ
 
 // The caller holds stateMu. inFlight excludes another worker for this account;
 // control-plane I/O releases the global lock so unrelated accounts keep moving.
-func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.Time) error {
+func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.Time, generation uint64) error {
+	e.stateMu.Unlock()
+	e.controlMu.Lock()
+	defer e.controlMu.Unlock()
+	e.stateMu.Lock()
+	if !e.targetEnabledLocked(r.AccountID) || generation != e.targetGenerationLocked(r.AccountID) {
+		return e.save()
+	}
 	e.stateMu.Unlock()
 	latest, err := e.Admin.Account(ctx, r.AccountID)
 	e.stateMu.Lock()
@@ -436,9 +452,18 @@ func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if !latest.Schedulable || latest.Status != "active" || !sameRevision(latest.UpdatedAt, before.UpdatedAt) || (latest.ExpiresAt != nil && !time.Now().Before(*latest.ExpiresAt)) {
-		r.Status = "external_change"
-		r.Reason = "采样期间账号已变更，本轮不执行暂停"
+	if !latest.Schedulable {
+		r.Hold = true
+		r.Pending = false
+		r.RecoveryPasses = 0
+		r.Status = "quarantined"
+		r.Reason = "账号已暂停，纳入插件管理，无需重复暂停"
+		e.Store.Event(r.AccountID, "managed_pause", r.Reason, now)
+		return e.save()
+	}
+	if latest.Status != "active" || (latest.ExpiresAt != nil && !time.Now().Before(*latest.ExpiresAt)) {
+		r.Status = "blocked"
+		r.Reason = "暂停前账号状态不可用，本轮不执行暂停"
 		return e.save()
 	}
 	r.Pending = true
@@ -452,7 +477,7 @@ func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.
 	e.stateMu.Lock()
 	if err != nil {
 		// A lost response does not prove the server failed to pause. Preserve
-		// intent for reconciliation without claiming automatic recovery rights.
+		// intent for reconciliation before any further scheduling write.
 		r.Status = "pause_uncertain"
 		r.Reason = "暂停回执未确认；下次检测会核对调度状态：" + err.Error()
 		r.NextAt = time.Now().UTC().Add(time.Duration(e.Config.RetrySeconds) * time.Second)
@@ -472,7 +497,14 @@ func (e *Engine) pause(ctx context.Context, before Account, r *Record, now time.
 	e.Store.Event(r.AccountID, "paused", r.Reason, now)
 	return e.save()
 }
-func (e *Engine) recover(ctx context.Context, r *Record, now time.Time) error {
+func (e *Engine) recover(ctx context.Context, r *Record, now time.Time, generation uint64) error {
+	e.stateMu.Unlock()
+	e.controlMu.Lock()
+	defer e.controlMu.Unlock()
+	e.stateMu.Lock()
+	if !e.targetEnabledLocked(r.AccountID) || generation != e.targetGenerationLocked(r.AccountID) {
+		return e.save()
+	}
 	e.stateMu.Unlock()
 	latest, err := e.Admin.Account(ctx, r.AccountID)
 	e.stateMu.Lock()
@@ -488,9 +520,19 @@ func (e *Engine) recover(ctx context.Context, r *Record, now time.Time) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if latest.Schedulable || latest.Status != "active" || !sameRevision(latest.UpdatedAt, r.PauseUpdatedAt) || (latest.ExpiresAt != nil && !time.Now().Before(*latest.ExpiresAt)) {
-		r.Status = "external_change"
-		r.Reason = "恢复前状态校验不通过，不覆盖外部操作"
+	if latest.Schedulable {
+		r.Hold = false
+		r.Pending = false
+		r.RecoveryPasses = 0
+		r.Status = "passed"
+		r.Reason = "读取确认账号已可调度，无需重复恢复"
+		e.Store.Event(r.AccountID, "resume_reconciled", r.Reason, now)
+		return e.save()
+	}
+	if latest.Status != "active" || (latest.ExpiresAt != nil && !time.Now().Before(*latest.ExpiresAt)) {
+		r.Status = "blocked"
+		r.RecoveryPasses = 0
+		r.Reason = "恢复前账号状态不可用，保留暂停"
 		return e.save()
 	}
 	e.Store.Event(r.AccountID, "recovery_intent", "连续两轮有效通过，准备恢复本插件暂停的账号", now)

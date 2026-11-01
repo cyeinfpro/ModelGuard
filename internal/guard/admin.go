@@ -98,13 +98,19 @@ func (a *AdminClient) Account(ctx context.Context, id int64) (Account, error) {
 	return x, err
 }
 func (a *AdminClient) Pause(ctx context.Context, id int64) (Account, error) {
-	var x Account
-	err := a.call(ctx, "POST", fmt.Sprintf("/api/v1/admin/accounts/%d/schedulable", id), map[string]bool{"schedulable": false}, &x)
-	if err == nil && (x.ID != id || x.Schedulable) {
-		err = errors.New("暂停调度未得到确认")
+	var receipt Account
+	if err := a.call(ctx, "POST", fmt.Sprintf("/api/v1/admin/accounts/%d/schedulable", id), map[string]bool{"schedulable": false}, &receipt); err != nil {
+		return receipt, err
 	}
-	if err == nil && (x.UpdatedAt == "" || x.Type == "apikey") && a.Enrich != nil {
-		err = a.Enrich(ctx, &x)
+	if receipt.ID != id {
+		return receipt, errors.New("调度写入回执未确认")
+	}
+	// Scoped mutation receipts contain only id/status. Resolve the account via
+	// the scoped read endpoint, never infer OAuth from an empty receipt type.
+	// A failed read is an uncertain result, not permission to repeat the write.
+	x, err := a.Account(ctx, id)
+	if err == nil && x.Schedulable != false {
+		err = errors.New("调度写入后的状态未确认")
 	}
 	return x, err
 }
@@ -142,13 +148,19 @@ func mappedModel(a Account, model string) string {
 }
 
 func (a *AdminClient) Resume(ctx context.Context, id int64) (Account, error) {
-	var x Account
-	err := a.call(ctx, "POST", fmt.Sprintf("/api/v1/admin/accounts/%d/schedulable", id), map[string]bool{"schedulable": true}, &x)
-	if err == nil && (x.ID != id || !x.Schedulable) {
-		err = errors.New("恢复调度未得到确认")
+	var receipt Account
+	if err := a.call(ctx, "POST", fmt.Sprintf("/api/v1/admin/accounts/%d/schedulable", id), map[string]bool{"schedulable": true}, &receipt); err != nil {
+		return receipt, err
 	}
-	if err == nil && (x.UpdatedAt == "" || x.Type == "apikey") && a.Enrich != nil {
-		err = a.Enrich(ctx, &x)
+	if receipt.ID != id {
+		return receipt, errors.New("调度写入回执未确认")
+	}
+	// Scoped mutation receipts contain only id/status. Resolve the account via
+	// the scoped read endpoint, never infer OAuth from an empty receipt type.
+	// A failed read is an uncertain result, not permission to repeat the write.
+	x, err := a.Account(ctx, id)
+	if err == nil && x.Schedulable != true {
+		err = errors.New("调度写入后的状态未确认")
 	}
 	return x, err
 }
