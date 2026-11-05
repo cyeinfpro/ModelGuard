@@ -77,20 +77,23 @@ function renderEvents(state) {
 }
 
 function renderRecords(s) {
-  const state = s.state || {}, saved = new Set(activeTargets(s).filter(target => target.enabled).map(target => target.account_id));
+  // A failed group sync freezes execution, but is not evidence of removal.
+  // Keep the last confirmed membership visible with its sync warning.
+  const targets = savedConfig.group_ids?.length && s.group_sync_error ? s.targets || [] : activeTargets(s);
+  const state = s.state || {}, saved = new Set(targets.filter(target => target.enabled).map(target => target.account_id));
   const selected = new Set(saved), unsaved = new Set();
   if (dirty && !savedConfig.group_ids?.length) for (const target of drafts.values()) {
     if (target.enabled && !saved.has(target.account_id)) { selected.add(target.account_id); unsaved.add(target.account_id); }
   }
   const all = Object.values(state.records || {});
-  const records = new Map(all.filter(record => selected.has(record.account_id) || record.hold || record.pending).map(record => [record.account_id, record]));
+  const records = new Map(all.filter(record => selected.has(record.account_id)).map(record => [record.account_id, record]));
   for (const id of selected) if (!records.has(id)) records.set(id, {account_id: id, status: "unverified"});
   const rows = Array.from(records.values()).sort((a, b) => a.account_id - b.account_id);
   const active = new Map((s.active_samples || (s.active_sample ? [s.active_sample] : [])).map(sample => [sample.account_id, sample]));
   const queued = new Set(s.batch?.queued_ids || []);
   setText($("targetCount"), s.target_count ?? saved.size);
-  setText($("holdCount"), rows.filter(record => record.hold).length);
-  setText($("recoverCount"), rows.filter(record => record.hold && record.recovery_passes > 0).length);
+  setText($("holdCount"), rows.filter(record => saved.has(record.account_id) && record.hold).length);
+  setText($("recoverCount"), rows.filter(record => saved.has(record.account_id) && record.hold && record.recovery_passes > 0).length);
   setText($("requestCount"), s.budget?.used ?? state.requests ?? 0);
   setText($("budgetLimit"), s.budget ? ` / ${s.budget.limit}` : "");
   for (const id of ["holdCount", "recoverCount"]) $(id).parentElement.hidden = Number($(id).textContent) === 0;
@@ -166,13 +169,15 @@ function renderRecords(s) {
   if (nodes.length) syncRows($("records"), nodes, monitorRows);
   else { monitorRows.clear(); emptyTable($("records"), "尚未选择检测账号。勾选并保存后会自动检测。", 4); }
   filterRecords();
-  const history = all.filter(record => !selected.has(record.account_id) && !record.hold && !record.pending).sort((a, b) => a.account_id - b.account_id);
+  const history = all.filter(record => !selected.has(record.account_id)).sort((a, b) => a.account_id - b.account_id);
   setText($("historyCount"), history.length);
   $("historyPanel").hidden = !history.length;
   const historyNodes = history.map(record => {
     let row = historyRows.get(record.account_id);
-    if (!row) { row = document.createElement("tr"); for (let i = 0; i < 4; i++) cell(row, ""); historyRows.set(record.account_id, row); }
-    [accountsByID.get(record.account_id)?.name || `账号 #${record.account_id}`, statusLabel(record.status), record.reason || "—", date(record.checked_at)].forEach((value, i) => setText(row.cells[i], value));
+    if (!row) { row = document.createElement("tr"); row.dataset.accountId = String(record.account_id); for (let i = 0; i < 4; i++) cell(row, ""); historyRows.set(record.account_id, row); }
+    const label = record.pending ? "未监测 · 调度变更待核对" : record.hold ? "未监测 · 保留暂停" : statusLabel(record.status);
+    const guidance = record.hold || record.pending ? `${savedConfig.group_ids?.length ? "不在当前管理范围" : "已移除监测"}；不自动检测或恢复。${record.pending ? "保留调度变更记录，重新纳入监测后核对。" : "重新纳入监测并保存后复测。"}${record.reason ? "上次：" + record.reason : ""}` : record.reason || "—";
+    [accountsByID.get(record.account_id)?.name || `账号 #${record.account_id}`, label, guidance, date(record.checked_at)].forEach((value, i) => setText(row.cells[i], value));
     return row;
   });
   syncRows($("historyRecords"), historyNodes, historyRows);

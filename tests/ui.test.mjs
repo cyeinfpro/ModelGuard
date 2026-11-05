@@ -83,10 +83,10 @@ test('bulk selection follows filter and shows unsaved state',async()=>{
  assert.match(w.document.getElementById('saveState').textContent,/未保存/);assert.equal(w.document.getElementById('runLabel').textContent,'保存并立即检测');
  w.document.getElementById('toggleKey').click();assert.equal(w.document.getElementById('admin_key').type,'text');w.document.getElementById('toggleKey').click();assert.equal(w.document.getElementById('admin_key').type,'password');dom.window.close();
 });
-test('removed historical targets are hidden without hiding owned quarantines',async()=>{
+test('removed historical targets and owned quarantines stay outside current monitoring',async()=>{
  const {dom,w,state}=await setup();state.state.records[999]={account_id:999,status:'skipped',hold:false};state.state.records[998]={account_id:998,status:'quarantined',hold:true};
  w.document.getElementById('refresh').click();await tick();
- assert(!w.document.getElementById('records').textContent.includes('999'));assert(w.document.getElementById('records').textContent.includes('998'));dom.window.close();
+ assert(!w.document.getElementById('records').textContent.includes('999'));assert(!w.document.getElementById('records').textContent.includes('998'));assert.match(w.document.getElementById('historyRecords').textContent,/998.*未监测 · 保留暂停/);assert.equal(w.document.getElementById('holdCount').textContent,'1');dom.window.close();
 });
 test('scheduled sample progress is not presented as an idle manual task',async()=>{
  const {dom,w,state}=await setup();state.active_sample={account_id:1,index:2,phase:'reasoning',started_at:new Date().toISOString(),timeout_seconds:180};
@@ -300,8 +300,10 @@ test('an owned hold removed from saved monitoring never promises an automatic re
  w.document.getElementById('discard').click();
  state.targets=[{account_id:1,enabled:false,model:'gpt-6.1-terra',expected:'gpt-6.1-terra'},{account_id:2,enabled:true,model:'gpt-6.1-sol',expected:'gpt-6-astra'}];state.target_count=1;
  w.document.getElementById('refresh').click();await tick();
- const next=w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent;
- assert.match(next,/未参与监测.*重新勾选并保存后复测.*保留暂停/);assert(!next.includes('小时后'));assert(!next.includes('确认恢复'));
+ assert.equal(w.document.querySelector('#records tr[data-account-id="1"]'),null);
+ const next=w.document.querySelector('#historyRecords tr[data-account-id="1"]').textContent;
+ assert.match(next,/未监测 · 保留暂停.*已移除监测.*不自动检测或恢复/);assert(!next.includes('小时后'));assert(!next.includes('确认恢复'));
+ assert.equal(w.document.getElementById('holdCount').textContent,'0');
  dom.window.close();
 });
 
@@ -311,7 +313,8 @@ test('group config saves explicit IDs and templates without persisting dynamic t
  const {dom,w,state,calls}=await setup({config:{group_ids:[12],group_model:'gpt-6.1-sol',group_expected:'gpt-6-astra',targets:[manual]},state:{targets:[dynamic],configured_targets:[manual],group_sync_pending_ids:[3]}});
  assert.match(w.document.getElementById('groupSyncStatus').textContent,/新成员等待配置：3/);
  assert(w.document.querySelector('#records tr[data-account-id="2"]'));
- assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/不在当前管理范围.*不恢复/);
+ assert.equal(w.document.querySelector('#records tr[data-account-id="1"]'),null);
+ assert.match(w.document.querySelector('#historyRecords tr[data-account-id="1"]').textContent,/不在当前管理范围.*不自动检测或恢复/);
  const input=w.document.getElementById('group_ids');input.value='12, 34 56';input.dispatchEvent(new w.Event('input',{bubbles:true}));
  state.targets=[];w.document.getElementById('refresh').click();await tick();
  assert.equal(input.value,'12, 34 56','refresh preserves group draft');
@@ -351,6 +354,7 @@ test('group sync errors cannot appear as a ready recovery despite healthy connec
  state.group_ids=[34];state.group_sync_error='';state.targets=[];
  w.document.getElementById('refresh').click();await tick();
  assert.equal(w.document.getElementById('group_ids').value,'34');
- assert.match(w.document.querySelector('#records tr[data-account-id="1"]').cells[3].textContent,/不在当前管理范围.*不恢复/);
+ assert.equal(w.document.querySelector('#records tr[data-account-id="1"]'),null);
+ assert.match(w.document.querySelector('#historyRecords tr[data-account-id="1"]').textContent,/不在当前管理范围.*不自动检测或恢复/);
  dom.window.close();
 });
