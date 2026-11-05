@@ -36,9 +36,10 @@ type Admin interface {
 	Proxy(context.Context, int64) (string, error)
 }
 type AdminClient struct {
-	Base, Key string
-	HTTP      *http.Client
-	Enrich    func(context.Context, *Account) error
+	Base, Key   string
+	HTTP        *http.Client
+	Enrich      func(context.Context, *Account) error
+	EnrichFresh func(context.Context, *Account) error
 }
 
 func NewAdmin(c Config) *AdminClient {
@@ -62,17 +63,18 @@ func (a *AdminClient) call(ctx context.Context, method, path string, body any, o
 	req.Header.Set("Content-Type", "application/json")
 	res, err := a.HTTP.Do(req)
 	if err != nil {
-		return errors.New("Sub2API 管理接口连接失败")
+		return &AdminConnectionError{Cause: err}
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
+		message := fmt.Sprintf("Sub2API 管理接口 HTTP %d", res.StatusCode)
 		if res.StatusCode == 401 {
-			return errors.New("管理员访问密钥无效或未填写（HTTP 401）")
+			message = "管理员访问密钥无效或未填写（HTTP 401）"
 		}
 		if res.StatusCode == 403 {
-			return errors.New("管理员访问密钥缺少该操作或账号范围的权限（HTTP 403）")
+			message = "管理员访问密钥缺少该操作或账号范围的权限（HTTP 403）"
 		}
-		return fmt.Errorf("Sub2API 管理接口 HTTP %d", res.StatusCode)
+		return &AdminHTTPError{StatusCode: res.StatusCode, RetryAfter: ParseRetryAfter(res.Header.Get("Retry-After"), time.Now()), Message: message}
 	}
 	var env struct {
 		Code int             `json:"code"`
@@ -87,13 +89,20 @@ func (a *AdminClient) call(ctx context.Context, method, path string, body any, o
 	return nil
 }
 func (a *AdminClient) Account(ctx context.Context, id int64) (Account, error) {
+	return a.account(ctx, id, false)
+}
+func (a *AdminClient) account(ctx context.Context, id int64, fresh bool) (Account, error) {
 	var x Account
 	err := a.call(ctx, "GET", fmt.Sprintf("/api/v1/admin/accounts/%d", id), nil, &x)
 	if err == nil && x.ID != id {
 		err = errors.New("管理接口返回了不同的账号")
 	}
-	if err == nil && (x.UpdatedAt == "" || x.Type == "apikey") && a.Enrich != nil {
-		err = a.Enrich(ctx, &x)
+	enrich := a.Enrich
+	if fresh && a.EnrichFresh != nil {
+		enrich = a.EnrichFresh
+	}
+	if err == nil && (x.UpdatedAt == "" || x.Type == "apikey") && enrich != nil {
+		err = enrich(ctx, &x)
 	}
 	return x, err
 }
@@ -108,8 +117,8 @@ func (a *AdminClient) Pause(ctx context.Context, id int64) (Account, error) {
 	// Scoped mutation receipts contain only id/status. Resolve the account via
 	// the scoped read endpoint, never infer OAuth from an empty receipt type.
 	// A failed read is an uncertain result, not permission to repeat the write.
-	x, err := a.Account(ctx, id)
-	if err == nil && x.Schedulable != false {
+	x, err := a.account(ctx, id, true)
+	if err == nil && x.Schedulable {
 		err = errors.New("调度写入后的状态未确认")
 	}
 	return x, err
@@ -158,8 +167,8 @@ func (a *AdminClient) Resume(ctx context.Context, id int64) (Account, error) {
 	// Scoped mutation receipts contain only id/status. Resolve the account via
 	// the scoped read endpoint, never infer OAuth from an empty receipt type.
 	// A failed read is an uncertain result, not permission to repeat the write.
-	x, err := a.Account(ctx, id)
-	if err == nil && x.Schedulable != true {
+	x, err := a.account(ctx, id, true)
+	if err == nil && !x.Schedulable {
 		err = errors.New("调度写入后的状态未确认")
 	}
 	return x, err

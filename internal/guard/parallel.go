@@ -59,6 +59,7 @@ func (e *Engine) runTargets(ctx context.Context, now time.Time, targets []Target
 	e.batch = batch
 	e.BatchBusy.Store(true)
 	e.publishLocked("")
+	limit := e.Config.Concurrency
 	e.stateMu.Unlock()
 	defer func() {
 		e.stateMu.Lock()
@@ -78,7 +79,6 @@ func (e *Engine) runTargets(ctx context.Context, now time.Time, targets []Target
 		e.publishLocked("")
 		e.stateMu.Unlock()
 	}()
-	limit := e.Config.Concurrency
 	if limit < 1 {
 		limit = 1
 	}

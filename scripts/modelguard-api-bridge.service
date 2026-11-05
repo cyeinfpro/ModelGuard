@@ -1,0 +1,35 @@
+[Unit]
+Description=ModelGuard local API credential bridge
+After=network.target
+
+[Service]
+Type=simple
+# The numeric identity must match the plugin's data ownership. It must not be 0.
+User=1000
+Group=1000
+ExecStart=/usr/bin/python3 /opt/modelguard/api-credential-bridge.py
+EnvironmentFile=/etc/modelguard/api-bridge.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=MODEL_GUARD_DATA_DIR=/var/lib/modelguard-bridge
+# Mount an existing Docker data path into this service without opening /root.
+# Override the source path and UID/GID to match the actual installation.
+BindPaths=/root/sub2api-deploy/data/sub2api-account-guard:/var/lib/modelguard-bridge
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/modelguard-bridge
+
+[Install]
+WantedBy=multi-user.target

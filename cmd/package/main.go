@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/cyeinfpro/ModelGuard/internal/metadata"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -76,7 +78,7 @@ func main() {
 			if err != nil {
 				return err
 			}
-			if !d.IsDir() {
+			if !d.IsDir() && d.Name() != ".DS_Store" && !strings.HasSuffix(d.Name(), ".pyc") {
 				b, err := os.ReadFile(path)
 				if err != nil {
 					return err
@@ -91,7 +93,7 @@ func main() {
 		must(err)
 		data["runtimes/linux-"+arch+"/account-guard"] = b
 	}
-	for _, name := range []string{"LICENSE", "COPYING", "README.md", "THIRD_PARTY_NOTICES.md", "docs/API-BRIDGE.md", "scripts/api-credential-bridge.py"} {
+	for _, name := range []string{"LICENSE", "COPYING", "README.md", "THIRD_PARTY_NOTICES.md", "docs/API-BRIDGE.md", "scripts/api-credential-bridge.py", "scripts/api-bridge-readonly.sql", "scripts/api-bridge.Dockerfile", "scripts/modelguard-api-bridge.service"} {
 		b, err := os.ReadFile(name)
 		must(err)
 		data[name] = b
@@ -100,7 +102,9 @@ func main() {
 		h := sha256.Sum256(b)
 		files[name] = hex.EncodeToString(h[:])
 	}
-	manifest := map[string]any{"schema_version": 1, "id": "local.sub2api.account-guard", "name": "模型哨兵", "version": version, "description": "分步接入、OAuth/API 并行巡检、明确状态、失败重试与自动恢复。", "author": "cyeinfpro", "requires": map[string]any{"sub2api": ">=0.2.19 <0.3.0", "recommended_sub2api_version": "0.2.19", "plugin_protocol": 1, "transport_api": 1, "ui_bridge": 1}, "capabilities": []any{map[string]any{"id": "openai.oauth.outbound_transport.v1", "platform": "openai", "account_type": "oauth"}}, "runtimes": map[string]any{"linux-amd64": map[string]string{"path": "runtimes/linux-amd64/account-guard"}, "linux-arm64": map[string]string{"path": "runtimes/linux-arm64/account-guard"}}, "ui": map[string]string{"entrypoint": "ui/index.html"}, "files": files}
+	manifest := metadata.Manifest(version)
+	manifest["runtimes"] = map[string]any{"linux-amd64": map[string]string{"path": "runtimes/linux-amd64/account-guard"}, "linux-arm64": map[string]string{"path": "runtimes/linux-arm64/account-guard"}}
+	manifest["files"] = files
 	mb, err := json.MarshalIndent(manifest, "", "  ")
 	must(err)
 	data["manifest.json"] = mb
@@ -122,7 +126,7 @@ func main() {
 	for name := range data {
 		names = append(names, name)
 	}
-	sortStrings(names)
+	sort.Strings(names)
 	for _, name := range names {
 		h := &zip.FileHeader{Name: name, Method: zip.Deflate}
 		h.SetMode(0644)
@@ -144,12 +148,5 @@ func main() {
 		fmt.Println("Created", *out, "unsigned; SHA-256 file hashes recorded in manifest (no publisher signature)")
 	} else {
 		fmt.Println("Created", *out, "with verified Ed25519 signature; publisher", *keyID)
-	}
-}
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
 	}
 }

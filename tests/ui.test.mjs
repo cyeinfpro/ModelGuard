@@ -1,17 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const html=await readFile(new URL('../ui/index.html',import.meta.url),'utf8');
-const js=await readFile(new URL('../ui/app.js',import.meta.url),'utf8');
-const tick=()=>new Promise(r=>setTimeout(r,20));
-async function setup(options={}){
- const dom=new JSDOM(html,{url:'https://sub2api.invalid/api/v1/plugin-ui/test/index.html#bridge_token=token',runScripts:'outside-only'});const w=dom.window;const calls=[];const state={enabled:true,target_count:1,monitoring_state:'running',accounts:[{id:1,name:'自动读取的账号',type:'oauth',status:'active',schedulable:true,supported:true,suggested_model:'gpt-6.1-terra',suggested_expected:'gpt-6.1-terra'},{id:2,name:'另一个账号',type:'oauth',status:'active',schedulable:false,supported:true,suggested_model:'gpt-6.1-sol',suggested_expected:'gpt-6-astra'}],models:[{id:'gpt-6.1-terra',display_name:'Terra'}],state:{requests:9,records:{1:{account_id:1,status:'quarantined',hold:true,failures:3,analysis:{predicted:'<img src=x onerror=alert(1)>'},reason:'test',next_at:'2026-10-30T08:00:00Z'}},events:[]}};
- const config={enabled:true,auto_pause:true,auto_recover:true,pause_unavailable:false,admin_url:'http://127.0.0.1:8080',admin_key:'test-secret',data_dir:'/app/data/sub2api-account-guard',normal_seconds:1800,retry_seconds:120,quarantine_seconds:21600,timeout_seconds:180,daily_requests:2000,targets:[{account_id:1,model:'gpt-6.1-terra',expected:'gpt-6.1-terra',enabled:true}]};
- Object.assign(config,options.config||{});Object.assign(state,options.state||{});
- const host={postMessage(m){calls.push(m);if(!['config.load','config.save','config.test','plugin.status'].includes(m.type))return;const response={source:'sub2api-plugin-host',bridge_token:'token',request_id:m.request_id,ok:true};if(m.type==='config.load')response.config=config;else if(m.type==='config.save'){Object.assign(config,m.config);response.config=config;}else if(m.type==='config.test'){if(config.manual_request_id){state.manual_busy=true;response.result={success:true,message:'检测已开始',status_json:JSON.stringify(state)};}else response.result={success:true,message:'连接正常',status_json:JSON.stringify({...state,diagnostic:{kind:'connection'}})};}else response.result={status_json:JSON.stringify(state)};const deliver=()=>w.dispatchEvent(new w.MessageEvent('message',{source:host,data:response}));if(options.respond?.({m,response,config,state,w,deliver})!==false)queueMicrotask(deliver);}};
- Object.defineProperty(w,'parent',{value:host});w.eval(js);await tick();return {dom,w,calls,host,state,config};
-}
+import {setup,tick,html,js} from './ui-fixture.mjs';
 test('legacy holds return to retesting without claiming immediate recovery',async()=>{
  for(const status of ['external_change','pause_uncertain']){
   const {dom,w,state,calls}=await setup();
@@ -148,13 +138,18 @@ test('missing unchecked targets are omitted and pruned on save; selected or owne
  assert(!targets.some(x=>x.account_id===13028));assert(targets.some(x=>x.account_id===900));assert(targets.some(x=>x.account_id===901));dom.window.close();
 });
 
-test('monitoring leads, settings are collapsed, and edits survive an active scheduled batch',async()=>{
- const {dom,w,state,calls}=await setup();assert.equal(w.document.getElementById('configPanel').open,false);assert.equal(w.document.getElementById('diagnosticsPanel').open,false);
+test('soft settings save during a scheduled batch and hard changes explain how to stop',async()=>{
+ const {dom,w,state,calls}=await setup();assert.equal(w.document.getElementById('configPanel').open,false);
  state.batch_busy=true;state.batch={kind:'scheduled',total:5,completed:1,active_ids:[1],queued_ids:[2,3,4]};
- w.document.getElementById('refresh').click();await tick();w.document.getElementById('manageAccounts').click();assert.equal(w.document.getElementById('configPanel').open,true);
- const el=w.document.getElementById('normal_seconds');el.value='2400';el.dispatchEvent(new w.Event('input',{bubbles:true}));assert.equal(w.document.getElementById('settings').disabled,false);assert.equal(w.document.getElementById('save').disabled,true);
- w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();assert.equal(calls.filter(x=>x.type==='config.save').length,0);
- state.batch_busy=false;state.batch.status='completed';w.document.getElementById('refresh').click();await tick();assert.equal(el.value,'2400');assert.equal(w.document.getElementById('save').disabled,false);dom.window.close();
+ w.document.getElementById('refresh').click();await tick();
+ const el=w.document.getElementById('normal_seconds');el.value='2400';el.dispatchEvent(new w.Event('input',{bubbles:true}));
+ assert.equal(w.document.getElementById('settings').disabled,false);assert.equal(w.document.getElementById('save').disabled,false);
+ w.document.getElementById('configForm').dispatchEvent(new w.Event('submit',{cancelable:true}));await tick();
+ assert.equal(calls.find(x=>x.type==='config.save').config.normal_seconds,2400);
+ assert.equal(calls.filter(x=>x.type==='config.test').length,0,'saving soft settings must not run connection diagnostics or consume manual commands');
+ const admin=w.document.getElementById('admin_url');admin.value='http://127.0.0.1:8081';admin.dispatchEvent(new w.Event('input',{bubbles:true}));
+ assert.equal(w.document.getElementById('save').disabled,true);assert.match(w.document.getElementById('saveState').textContent,/停止当前检测/);
+ assert.equal(w.document.getElementById('stopNow').hidden,false);dom.window.close();
 });
 
 test('first use leads with connection and saves only connection before discovery',async()=>{

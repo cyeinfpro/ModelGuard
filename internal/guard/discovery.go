@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cyeinfpro/ModelGuard/internal/metadata"
 	"sort"
 )
 
@@ -65,10 +66,10 @@ func (a *AdminClient) ListAccounts(ctx context.Context) ([]AccountOption, error)
 			if x.Platform != "openai" {
 				continue
 			}
-			option := AccountOption{GroupIDs: x.GroupIDs, ID: x.ID, Name: x.Name, Type: x.Type, Status: x.Status, Schedulable: x.Schedulable, Supported: x.ParentID == nil && (x.Type == "oauth" || x.Type == "apikey"), SuggestedModel: "gpt-6.1-terra", SuggestedExpected: "gpt-6.1-terra"}
+			option := AccountOption{GroupIDs: x.GroupIDs, ID: x.ID, Name: x.Name, Type: x.Type, Status: x.Status, Schedulable: x.Schedulable, Supported: x.ParentID == nil && (x.Type == "oauth" || x.Type == "apikey"), SuggestedModel: metadata.Defaults.OAuthModel, SuggestedExpected: metadata.Defaults.OAuthExpected}
 			if x.Type == "apikey" {
-				option.SuggestedModel = "gpt-6.1-sol"
-				option.SuggestedExpected = "gpt-6-astra"
+				option.SuggestedModel = metadata.Defaults.APIModel
+				option.SuggestedExpected = metadata.Defaults.APIExpected
 			}
 			out = append(out, option)
 		}

@@ -20,12 +20,30 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - run: python3 scripts/sync-metadata.py --check
       - run: make test
+      - name: Static analysis and vulnerability scan
+        run: |
+          go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+          python3 -m pip install ruff==0.17.3
+          python3 -m ruff check scripts tests --select E4,E9,F
+      - name: Record performance baselines
+        run: |
+          mkdir -p build
+          go test ./internal/guard -run '^$' -bench 'Benchmark(Snapshot|Store|Publish)' -benchmem -count=1 | tee build/benchmarks.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ModelGuard-benchmarks
+          path: build/benchmarks.txt
+          if-no-files-found: error
       - run: make check-package
       - run: make package
       - run: make verify-package

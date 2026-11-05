@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/cyeinfpro/ModelGuard/internal/fingerprint"
 	"github.com/cyeinfpro/ModelGuard/internal/guard"
+	"github.com/cyeinfpro/ModelGuard/internal/metadata"
 	v1 "github.com/cyeinfpro/ModelGuard/internal/pluginv1"
 	hcplugin "github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
@@ -19,36 +20,54 @@ import (
 	"time"
 )
 
-const ID = "local.sub2api.account-guard"
-const Capability = "openai.oauth.outbound_transport.v1"
-
-var Version = "0.3.2"
+var ID = metadata.Plugin.ID
+var Capability = metadata.Plugin.Capabilities[0].ID
+var Version = metadata.Version
 
 type Plugin struct {
 	v1.UnimplementedTransportPluginServer
-	mu               sync.RWMutex
-	applyMu          sync.Mutex
-	discoveryMu      sync.Mutex
-	detector         *fingerprint.Detector
-	broker           *hcplugin.GRPCBroker
-	host             v1.HostServiceClient
-	conn             *grpc.ClientConn
-	config           guard.Config
-	engine           *guard.Engine
-	cancel           context.CancelFunc
-	done             chan struct{}
-	pool             guard.ClientPool
-	groupSyncPending []int64
-	groupSyncError   string
-	accounts         []guard.AccountOption
-	accountsError    string
-	accountsLoading  bool
-	accountsUpdated  time.Time
-	accountsChecked  time.Time
-	accountsEpoch    uint64
-	accountsRequest  uint64
-	pendingManual    string
-	runtimeError     string
+	mu                   sync.RWMutex
+	applyMu              sync.Mutex
+	discoveryMu          sync.Mutex
+	detector             *fingerprint.Detector
+	broker               *hcplugin.GRPCBroker
+	host                 v1.HostServiceClient
+	conn                 *grpc.ClientConn
+	config               guard.Config
+	engine               *guard.Engine
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	pool                 guard.ClientPool
+	groupSyncPending     []int64
+	groupSyncError       string
+	accounts             []guard.AccountOption
+	accountsError        string
+	accountsLoading      bool
+	accountsUpdated      time.Time
+	accountsChecked      time.Time
+	accountsEpoch        uint64
+	accountsRequest      uint64
+	pendingManual        string
+	runtimeError         string
+	pendingStop          string
+	modelsEncoded        json.RawMessage
+	accountsEncoded      json.RawMessage
+	accountsRevision     string
+	accountsIndex        map[int64]guard.AccountOption
+	accountsEncodedCount int
+	discoveryWake        chan struct{}
+	discoveryRefresh     bool
+	discoveryInterval    time.Duration
+	discoverySuspended   bool
+	discoveryFailures    int
+	metadataMu           sync.Mutex
+	metadataCache        map[string]*accountMetadataEntry
+	hostEpoch            uint64
+	bridgeMu             sync.Mutex
+	bridgeDir            string
+	bridgeChecked        time.Time
+	bridgeCached         bridgeInstallation
+	forwardStats         forwardCounters
 }
 
 func New() (*Plugin, error) {
@@ -56,7 +75,10 @@ func New() (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Plugin{detector: d, config: guard.DefaultConfig()}, nil
+	p := &Plugin{detector: d, config: guard.DefaultConfig()}
+	p.modelsEncoded, _ = json.Marshal(d.Models())
+	p.cacheAccountsLocked(nil)
+	return p, nil
 }
 func (p *Plugin) SetHostBroker(b *hcplugin.GRPCBroker) {
 	p.mu.Lock()
@@ -78,6 +100,8 @@ func (p *Plugin) InitHostServices(ctx context.Context, r *v1.InitHostServicesReq
 	}
 	p.conn = conn
 	p.host = v1.NewHostServiceClient(conn)
+	p.hostEpoch++
+	p.invalidateMetadata()
 	return &v1.InitHostServicesResponse{Ready: true}, nil
 }
 func (p *Plugin) resolve(ctx context.Context, id int64) (guard.Identity, error) {
@@ -102,85 +126,6 @@ func (p *Plugin) resolve(ctx context.Context, id int64) (guard.Identity, error) 
 }
 func (p *Plugin) GetInfo(context.Context, *v1.GetInfoRequest) (*v1.GetInfoResponse, error) {
 	return &v1.GetInfoResponse{PluginId: ID, PluginVersion: Version, ProtocolVersion: 1, TransportApiVersion: 1, Capabilities: []string{Capability}}, nil
-}
-func (p *Plugin) Health(context.Context, *v1.HealthRequest) (*v1.HealthResponse, error) {
-	p.mu.RLock()
-	e, cfg, host := p.engine, p.config, p.host != nil
-	accounts := append([]guard.AccountOption{}, p.accounts...)
-	listError, loading, updated, checked := p.accountsError, p.accountsLoading, p.accountsUpdated, p.accountsChecked
-	pending, runtimeError := p.pendingManual, p.runtimeError
-	groupPending, groupError := append([]int64{}, p.groupSyncPending...), p.groupSyncError
-	p.mu.RUnlock()
-	configuredTargets := cfg.Targets
-	if e != nil {
-		cfg.Targets = e.ManagedTargets()
-	}
-	now := time.Now().UTC()
-	connection := connectionStatus(cfg, len(accounts), listError, loading, checked, updated, now)
-	bridge := inspectBridge(cfg.DataDir)
-	status := map[string]any{}
-	if e != nil {
-		_ = json.Unmarshal([]byte(e.Snapshot()), &status)
-	}
-	count := 0
-	for _, t := range cfg.Targets {
-		if t.Enabled {
-			count++
-		}
-	}
-	mode := "disabled"
-	if cfg.Enabled {
-		mode = "running"
-		if count == 0 {
-			mode = "waiting_targets"
-		}
-		if listError != "" {
-			mode = "connection_error"
-		}
-		if loading && updated.IsZero() && listError == "" {
-			mode = "loading_accounts"
-		}
-		if runtimeError != "" {
-			mode = "runtime_error"
-		}
-	}
-	status["status_version"] = 2
-	status["observed_at"] = now
-	status["connection"] = connection
-	status["readiness"] = readinessStatus(cfg, accounts, connection, host, bridge, runtimeError)
-	status["runtime_error"] = runtimeError
-	status["manual_pending"] = pending != ""
-	status["manual_request_id"] = cfg.ManualRequestID
-	status["manual_busy"] = e != nil && e.ManualBusy.Load()
-	status["manual_queued"] = e != nil && e.ManualQueued.Load()
-	status["batch_busy"] = e != nil && e.BatchBusy.Load()
-	status["enabled"] = cfg.Enabled
-	status["auto_pause"] = cfg.AutoPause
-	status["auto_recover"] = cfg.AutoRecover
-	status["host_identity_available"] = host
-	status["api_bridge_ready"] = bridge.State == "installed"
-	status["api_bridge_state"] = bridge.State
-	status["api_bridge_message"] = bridge.Message
-	status["models"] = p.detector.Models()
-	status["detector_version"] = p.detector.Version()
-	status["target_count"] = count
-	status["targets"] = cfg.Targets
-	status["configured_targets"] = configuredTargets
-	status["group_ids"] = cfg.GroupIDs
-	status["group_sync_pending_ids"] = groupPending
-	status["group_sync_error"] = groupError
-	status["monitoring_state"] = mode
-	status["accounts"] = accounts
-	status["accounts_error"] = listError
-	status["accounts_loading"] = loading
-	status["accounts_updated_at"] = updated
-	status["accounts_checked_at"] = checked
-	raw, _ := json.Marshal(status)
-	message := "ModelGuard runtime ready"
-	if runtimeError != "" {
-		message = runtimeError
-	}
-	return &v1.HealthResponse{Healthy: runtimeError == "", Message: message, StatusJson: string(raw)}, nil
 }
 func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, error) {
 	if err := ctx.Err(); err != nil {
@@ -210,9 +155,12 @@ func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, erro
 			return len(accounts), ctx.Err()
 		}
 		p.accountsChecked = time.Now().UTC()
+		p.discoveryResultLocked(p.config, err)
 		base, current := c, p.config
 		base.ManualRequestID = ""
 		current.ManualRequestID = ""
+		base.StopRequestID = ""
+		current.StopRequestID = ""
 		syncGroups := len(c.GroupIDs) > 0 && reflect.DeepEqual(base, current)
 		if err != nil {
 			p.accountsError = err.Error()
@@ -228,7 +176,7 @@ func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, erro
 				}
 			}
 		} else {
-			p.accounts = accounts
+			p.cacheAccountsLocked(accounts)
 			p.accountsError = ""
 			p.accountsUpdated = time.Now().UTC()
 			if syncGroups {
@@ -264,22 +212,6 @@ func (p *Plugin) refreshAccounts(ctx context.Context, c guard.Config) (int, erro
 	}
 	return len(accounts), err
 }
-func (p *Plugin) discoveryLoop(ctx context.Context, c guard.Config) {
-	if strings.TrimSpace(c.AdminKey) == "" {
-		<-ctx.Done()
-		return
-	}
-	for {
-		_, _ = p.refreshAccounts(ctx, c)
-		timer := time.NewTimer(10 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-	}
-}
 func (p *Plugin) ValidateConfig(ctx context.Context, r *v1.ValidateConfigRequest) (*v1.ValidateConfigResponse, error) {
 	c, err := guard.ParseConfig(r.ConfigJson, p.detector)
 	if err != nil {
@@ -287,6 +219,29 @@ func (p *Plugin) ValidateConfig(ctx context.Context, r *v1.ValidateConfigRequest
 	}
 	raw, _ := json.Marshal(c)
 	return &v1.ValidateConfigResponse{Valid: true, NormalizedConfigJson: raw}, nil
+}
+
+// Hard fields identify administrative authority and durable state. All other
+// settings are applied to the live engine without resetting startup grace.
+func sameRuntimeAuthority(a, b guard.Config) bool {
+	return a.AdminURL == b.AdminURL && a.AdminKey == b.AdminKey && a.DataDir == b.DataDir
+}
+func withoutActions(c guard.Config) guard.Config {
+	c.ManualRequestID, c.StopRequestID = "", ""
+	return c
+}
+func (p *Plugin) saveCommandsLocked(old, c guard.Config) {
+	if c.ManualRequestID == "" {
+		p.pendingManual = ""
+	} else if c.ManualRequestID != old.ManualRequestID {
+		p.pendingManual = c.ManualRequestID
+	}
+	if c.StopRequestID == "" {
+		p.pendingStop = ""
+	} else if c.StopRequestID != old.StopRequestID {
+		p.pendingStop = c.StopRequestID
+		p.pendingManual = ""
+	}
 }
 func (p *Plugin) ApplyConfig(ctx context.Context, r *v1.ApplyConfigRequest) (*v1.ApplyConfigResponse, error) {
 	p.applyMu.Lock()
@@ -296,37 +251,54 @@ func (p *Plugin) ApplyConfig(ctx context.Context, r *v1.ApplyConfigRequest) (*v1
 		return &v1.ApplyConfigResponse{Message: err.Error()}, nil
 	}
 	p.mu.RLock()
-	old := p.config
-	oldPending := p.pendingManual
-	engine := p.engine
-	cancel := p.cancel
-	done := p.done
+	old, oldPending, oldStop := p.config, p.pendingManual, p.pendingStop
+	engine, cancel, done := p.engine, p.cancel, p.done
 	p.mu.RUnlock()
 	if done != nil && reflect.DeepEqual(old, c) {
 		return &v1.ApplyConfigResponse{Applied: true, Message: "配置未变更"}, nil
 	}
-	oldBase, newBase := old, c
-	oldBase.ManualRequestID = ""
-	newBase.ManualRequestID = ""
-	if done != nil && reflect.DeepEqual(oldBase, newBase) {
-		if c.ManualRequestID != "" && (engine == nil || engine.ManualBusy.Load()) {
-			return &v1.ApplyConfigResponse{Message: "请先保存检测账号，或等待当前检测完成"}, nil
+	newManual := c.ManualRequestID != "" && c.ManualRequestID != old.ManualRequestID
+	newStop := c.StopRequestID != "" && c.StopRequestID != old.StopRequestID
+	if done != nil && newManual && !newStop && (engine == nil || engine.ManualBusy.Load()) {
+		return &v1.ApplyConfigResponse{Message: "请先保存检测账号，或等待当前检测完成"}, nil
+	}
+	actionOnly := reflect.DeepEqual(withoutActions(old), withoutActions(c))
+	needsEngine := c.Enabled || len(c.Targets) > 0 || len(c.GroupIDs) > 0
+	if done != nil && sameRuntimeAuthority(old, c) && (engine != nil || !needsEngine) {
+		// Discovery performs network I/O before this lock. Serialize only its
+		// commit with a soft config commit, so old membership cannot overwrite
+		// newly selected groups after UpdateConfig has accepted them.
+		p.discoveryMu.Lock()
+		defer p.discoveryMu.Unlock()
+		if engine != nil && !actionOnly {
+			if err := engine.UpdateConfig(c); err != nil {
+				return &v1.ApplyConfigResponse{Message: err.Error()}, nil
+			}
 		}
 		p.mu.Lock()
 		p.config = c
-		p.pendingManual = c.ManualRequestID
+		p.saveCommandsLocked(old, c)
+		if !actionOnly {
+			p.accountsEpoch++
+			p.discoveryFailures = 0
+			p.discoverySuspended = false
+			p.discoveryInterval = baseDiscoveryInterval(c)
+			p.wakeDiscoveryLocked(true)
+		}
 		p.mu.Unlock()
-		return &v1.ApplyConfigResponse{Applied: true, Message: "检测请求已保存"}, nil
+		message := "配置已保存并应用，当前检测继续执行"
+		if actionOnly {
+			message = "操作请求已保存"
+		}
+		return &v1.ApplyConfigResponse{Applied: true, Message: message}, nil
 	}
 	if engine != nil && !engine.TrySuspend() {
-		return &v1.ApplyConfigResponse{Message: "检测执行中，编辑内容已保留；请等待本轮完成后保存"}, nil
+		return &v1.ApplyConfigResponse{Message: "管理端或状态目录变更需要检测空闲；请先停止本轮检测再保存"}, nil
 	}
 	if cancel != nil {
 		cancel()
 		<-done
 	}
-	// Keep config rollback local: if the new state directory cannot be opened,
-	// reopen the previous one and restart its worker before returning failure.
 	e, err := p.start(c)
 	if err != nil {
 		_, restore := p.start(old)
@@ -338,15 +310,21 @@ func (p *Plugin) ApplyConfig(ctx context.Context, r *v1.ApplyConfigRequest) (*v1
 			return &v1.ApplyConfigResponse{Message: "配置失败且旧监测无法重启；请检查状态目录"}, nil
 		}
 		p.mu.Lock()
-		p.pendingManual = oldPending
+		p.pendingManual, p.pendingStop = oldPending, oldStop
 		p.mu.Unlock()
 		return &v1.ApplyConfigResponse{Message: err.Error()}, nil
 	}
-	// A new manual command saved WITH configuration changes must survive start.
-	// Initial/temporary runtime initialization must never replay a stored nonce.
-	if done != nil && e != nil && c.ManualRequestID != "" && c.ManualRequestID != old.ManualRequestID {
+	// Persisted action IDs are inert on initialization. Only new commands saved
+	// in this process can be consumed by the following config.test call.
+	if done != nil {
 		p.mu.Lock()
-		p.pendingManual = c.ManualRequestID
+		if e != nil && newManual {
+			p.pendingManual = c.ManualRequestID
+		}
+		if newStop {
+			p.pendingStop = c.StopRequestID
+			p.pendingManual = ""
+		}
 		p.mu.Unlock()
 	}
 	message := "配置已保存；定时检测已关闭，可手动检测"
@@ -362,9 +340,9 @@ func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 	// Keep existing ownership/history visible even after the last target is
 	// deselected. An unconfigured fresh installation need not create a store.
 	_, stateErr := os.Stat(filepath.Join(c.DataDir, "state.json"))
-	if c.Enabled || len(c.Targets) > 0 || !os.IsNotExist(stateErr) {
+	if c.Enabled || len(c.Targets) > 0 || len(c.GroupIDs) > 0 || !os.IsNotExist(stateErr) {
 		admin := guard.NewAdmin(c)
-		admin.Enrich = func(ctx context.Context, a *guard.Account) error {
+		enrich := func(ctx context.Context, a *guard.Account, fresh bool) error {
 			if a.Type == "apikey" {
 				full, err := guard.ReadAPIAccount(ctx, c, a.ID)
 				if err != nil {
@@ -376,9 +354,14 @@ func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 				*a = full
 				return nil
 			}
+			if fresh {
+				return p.enrichAccountFresh(ctx, a)
+			}
 			return p.enrichAccount(ctx, a)
 		}
-		probe := &guard.Prober{Resolve: p.resolve, Pool: &p.pool}
+		admin.Enrich = func(ctx context.Context, a *guard.Account) error { return enrich(ctx, a, false) }
+		admin.EnrichFresh = func(ctx context.Context, a *guard.Account) error { return enrich(ctx, a, true) }
+		probe := &guard.Prober{Resolve: p.resolve}
 		var err error
 		e, err = guard.NewEngine(c, p.detector, admin, probe)
 		if err != nil {
@@ -391,6 +374,7 @@ func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 	sameConnection := p.config.AdminURL == c.AdminURL && p.config.AdminKey == c.AdminKey
 	p.engine = e
 	p.pendingManual = ""
+	p.pendingStop = ""
 	p.config = c
 	p.cancel = cancel
 	p.done = done
@@ -399,8 +383,14 @@ func (p *Plugin) start(c guard.Config) (*guard.Engine, error) {
 	p.groupSyncPending = nil
 	p.groupSyncError = ""
 	p.accountsLoading = strings.TrimSpace(c.AdminKey) != ""
+	p.discoveryWake = make(chan struct{}, 1)
+	p.discoveryRefresh = false
+	p.discoveryInterval = baseDiscoveryInterval(c)
+	p.discoverySuspended = false
+	p.discoveryFailures = 0
+	p.invalidateMetadata()
 	if !sameConnection {
-		p.accounts = []guard.AccountOption{}
+		p.cacheAccountsLocked(nil)
 		p.accountsError = ""
 		p.accountsUpdated = time.Time{}
 		p.accountsChecked = time.Time{}
@@ -427,11 +417,30 @@ func (p *Plugin) TestConfig(ctx context.Context, r *v1.TestConfigRequest) (*v1.T
 		return p.testResponse(start, false, err.Error(), map[string]any{"kind": "connection", "code": "config_invalid", "config_applied": false}), nil
 	}
 	p.mu.RLock()
-	engine, request, committed, applied := p.engine, p.pendingManual, p.config, p.done != nil
+	engine, request, stopRequest, committed, applied := p.engine, p.pendingManual, p.pendingStop, p.config, p.done != nil
 	p.mu.RUnlock()
 	configMatches := reflect.DeepEqual(c, committed)
 	if err := ctx.Err(); err != nil {
 		return p.testResponse(start, false, "请求已取消，请重新操作", map[string]any{"kind": "connection", "code": "request_cancelled", "config_applied": applied && configMatches}), nil
+	}
+	if stopRequest != "" {
+		meta := map[string]any{"kind": "stop", "config_applied": applied && configMatches, "request_id": stopRequest}
+		if c.StopRequestID != stopRequest || !configMatches {
+			meta["code"] = "config_mismatch"
+			return p.testResponse(start, false, "停止请求与已保存配置不一致，请重新加载配置", meta), nil
+		}
+		interrupted := false
+		if engine != nil {
+			interrupted = engine.StopCurrent()
+		}
+		p.mu.Lock()
+		p.pendingStop = ""
+		p.pendingManual = ""
+		p.mu.Unlock()
+		meta["code"] = "stop_accepted"
+		meta["accepted"] = true
+		meta["interrupted"] = interrupted
+		return p.testResponse(start, true, "本轮检测已停止，已有隔离状态保持；后续按重试时间继续", meta), nil
 	}
 	// Only a command explicitly saved in this process may trigger a run.
 	// Validate before consuming it; mismatched diagnostics and transient queue
@@ -463,7 +472,11 @@ func (p *Plugin) TestConfig(ctx context.Context, r *v1.TestConfigRequest) (*v1.T
 		return p.testResponse(start, false, "配置已发生变化，请重新加载后再检测连接", map[string]any{"kind": "connection", "code": "config_mismatch", "config_applied": false}), nil
 	}
 	// Check authentication and pagination even when there are no targets.
+	p.invalidateMetadata()
 	n, err := p.refreshAccounts(ctx, c)
+	p.mu.Lock()
+	p.wakeDiscoveryLocked(false)
+	p.mu.Unlock()
 	meta := map[string]any{"kind": "connection", "config_applied": applied && configMatches, "account_count": n}
 	if err != nil {
 		meta["code"] = connectionErrorCode(err.Error())
@@ -480,18 +493,6 @@ func (p *Plugin) TestConfig(ctx context.Context, r *v1.TestConfigRequest) (*v1.T
 	return p.testResponse(start, true, message, meta), nil
 }
 
-func (p *Plugin) testResponse(start time.Time, success bool, message string, diagnostic map[string]any) *v1.TestConfigResponse {
-	h, _ := p.Health(context.Background(), &v1.HealthRequest{})
-	status := map[string]any{}
-	_ = json.Unmarshal([]byte(h.StatusJson), &status)
-	diagnostic["checked_at"] = time.Now().UTC()
-	status["diagnostic"] = diagnostic
-	if diagnostic["kind"] == "manual" && diagnostic["accepted"] == true {
-		status["manual_request"] = map[string]any{"id": diagnostic["request_id"], "accepted": true, "state": "queued"}
-	}
-	raw, _ := json.Marshal(status)
-	return &v1.TestConfigResponse{Success: success, Message: message, LatencyMs: time.Since(start).Milliseconds(), StatusJson: string(raw)}
-}
 func (p *Plugin) Close() {
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
@@ -511,11 +512,14 @@ func (p *Plugin) Close() {
 	p.done = nil
 	p.engine = nil
 	p.host = nil
+	p.hostEpoch++
 	p.conn = nil
 	p.pendingManual = ""
+	p.pendingStop = ""
 	p.accountsEpoch++
 	p.groupSyncPending = nil
 	p.groupSyncError = ""
 	p.accountsLoading = false
+	p.invalidateMetadata()
 	p.mu.Unlock()
 }

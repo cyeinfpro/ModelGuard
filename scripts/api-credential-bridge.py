@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 from dataclasses import dataclass
 import errno
 import fcntl
 import hmac
 import http.server
+import importlib
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import queue
 import signal
 import socket
 import socketserver
@@ -33,6 +37,13 @@ class Config:
     db_container: str = "sub2api-postgres"
     uid: int = 1000
     gid: int = 1000
+    db_mode: str = "direct"
+    db_host: str = "/var/run/postgresql"
+    db_port: int = 5432
+    db_name: str = "sub2api"
+    db_user: str = "modelguard_bridge"
+    db_passfile: str = ""
+    db_sslmode: str = "prefer"
 
 
 class BridgeError(Exception):
@@ -52,6 +63,28 @@ ADMIN_HTTP = urllib.request.build_opener(
 )
 
 
+def local_admin_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    host = (parsed.hostname or "").lower()
+    try:
+        address = None if host == "localhost" else ipaddress.ip_address(host)
+        local = host == "localhost" or ("%" not in host and (
+            address.is_loopback or getattr(address, "ipv4_mapped", None)
+            and address.ipv4_mapped.is_loopback))
+    except ValueError:
+        local = False
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("management URL has an invalid port") from None
+    if (parsed.scheme not in ("http", "https") or not local
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+            or parsed.netloc.endswith(":") or port == 0):
+        raise ValueError("management URL must be a loopback site root")
+    return parsed._replace(path="").geturl()
+
+
 def load_config() -> Config:
     root = Path(os.environ.get(
         "MODEL_GUARD_DATA_DIR",
@@ -64,20 +97,125 @@ def load_config() -> Config:
         raise ValueError("bridge token must not contain whitespace")
     admin_url = os.environ.get(
         "MODEL_GUARD_ADMIN_URL", "http://127.0.0.1:8080"
-    ).rstrip("/")
-    parsed = urllib.parse.urlsplit(admin_url)
-    # This helper only reads this installation's management endpoint.
-    if (parsed.scheme not in ("http", "https")
-            or parsed.hostname not in ("127.0.0.1", "localhost", "::1")
-            or parsed.username is not None or parsed.password is not None
-            or parsed.path or parsed.query or parsed.fragment):
-        raise ValueError("management URL must be a local site root")
+    )
+    admin_url = local_admin_url(admin_url)
+    mode = os.environ.get("MODEL_GUARD_DB_MODE", "direct")
+    if mode not in ("direct", "docker"):
+        raise ValueError("unsupported database connection mode")
+    port = int(os.environ.get("MODEL_GUARD_DB_PORT", "5432"))
+    if not 1 <= port <= 65535:
+        raise ValueError("invalid database port")
+    sslmode = os.environ.get("MODEL_GUARD_DB_SSLMODE", "prefer")
+    if sslmode not in ("disable", "allow", "prefer", "require", "verify-ca", "verify-full"):
+        raise ValueError("invalid database TLS mode")
     return Config(
         root=root, token=token, admin_url=admin_url,
         db_container=os.environ.get("MODEL_GUARD_DB_CONTAINER", "sub2api-postgres"),
         uid=int(os.environ.get("MODEL_GUARD_UID", "1000")),
         gid=int(os.environ.get("MODEL_GUARD_GID", "1000")),
+        db_mode=mode,
+        db_host=os.environ.get("MODEL_GUARD_DB_HOST", "/var/run/postgresql"),
+        db_port=port,
+        db_name=os.environ.get("MODEL_GUARD_DB_NAME", "sub2api"),
+        db_user=os.environ.get("MODEL_GUARD_DB_USER", "modelguard_bridge"),
+        db_passfile=os.environ.get("MODEL_GUARD_DB_PASSFILE", ""),
+        db_sslmode=sslmode,
     )
+
+
+class DatabasePool:
+    """Bounded direct connections; one borrower per connection, no Docker access."""
+
+    def __init__(self, config: Config, limit: int = 8):
+        self.config = config
+        self.limit = limit
+        self.idle = queue.LifoQueue(limit)
+        self.lock = threading.Lock()
+        self.count = 0
+        self.closed = False
+
+    def connect(self):
+        # Imported lazily: healthz and synthetic tests need no DB dependency.
+        driver = importlib.import_module("psycopg")
+        c = self.config
+        kwargs = dict(host=c.db_host, port=c.db_port, dbname=c.db_name,
+                      user=c.db_user, sslmode=c.db_sslmode, connect_timeout=5,
+                      autocommit=True, application_name="modelguard-bridge",
+                      options="-c default_transaction_read_only=on -c statement_timeout=8000")
+        if c.db_passfile:
+            kwargs["passfile"] = c.db_passfile
+        return driver.connect(**kwargs)
+
+    def acquire(self):
+        with self.lock:
+            if self.closed:
+                raise BridgeError(503, "database pool is closed")
+            try:
+                return self.idle.get_nowait()
+            except queue.Empty:
+                create = self.count < self.limit
+                if create:
+                    self.count += 1
+        if create:
+            try:
+                return self.connect()
+            except Exception:
+                with self.lock:
+                    self.count -= 1
+                raise
+        try:
+            return self.idle.get(timeout=1)
+        except queue.Empty:
+            raise BridgeError(503, "database connection limit reached") from None
+
+    def release(self, connection, broken=False):
+        with self.lock:
+            if broken or self.closed or connection.closed:
+                self.count -= 1
+                connection.close()
+            else:
+                self.idle.put_nowait(connection)
+
+    @contextlib.contextmanager
+    def connection(self):
+        connection = self.acquire()
+        broken = False
+        try:
+            yield connection
+        except Exception:
+            broken = True
+            raise
+        finally:
+            self.release(connection, broken)
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            while not self.idle.empty():
+                self.idle.get_nowait().close()
+                self.count -= 1
+
+
+DATABASE_POOLS = {}
+DATABASE_POOL_LOCK = threading.Lock()
+
+
+def database_pool(config: Config) -> DatabasePool:
+    # Do not include the socket token in a cache key or diagnostic value.
+    key = (config.db_host, config.db_port, config.db_name, config.db_user,
+           config.db_passfile, config.db_sslmode)
+    with DATABASE_POOL_LOCK:
+        if key not in DATABASE_POOLS:
+            DATABASE_POOLS[key] = DatabasePool(config)
+        return DATABASE_POOLS[key]
+
+
+def close_database_pools():
+    with DATABASE_POOL_LOCK:
+        pools = list(DATABASE_POOLS.values())
+        DATABASE_POOLS.clear()
+    for pool in pools:
+        pool.close()
 
 
 def lookup_scope(config: Config, account_id: int, key: str) -> dict:
@@ -105,34 +243,48 @@ def lookup_scope(config: Config, account_id: int, key: str) -> dict:
         return account
     except urllib.error.HTTPError as exc:
         status_code = exc.code if exc.code in (401, 403, 404, 429) else 502
+        exc.close()
         raise BridgeError(
             status_code, "management authorization or account lookup failed"
         ) from None
 
 
+ACCOUNT_SQL = """select json_build_object(
+    'id',id,'name',name,'platform',platform,'type',type,
+    'status',status,'schedulable',schedulable,'updated_at',updated_at,
+    'expires_at',expires_at,'parent_account_id',parent_account_id,
+    'credentials',json_build_object('api_key',api_key,'base_url',base_url,
+        'model_mapping',model_mapping),'proxy',proxy)
+    from public.modelguard_bridge_accounts where id=%s"""
+
+
 def database_account(config: Config, account_id: int) -> dict:
-    # Interpolation is a validated positive integer. SELECT only.
-    sql = """select json_build_object(
-        'id',a.id,'name',a.name,'platform',a.platform,'type',a.type,
-        'status',a.status,'schedulable',a.schedulable,'updated_at',a.updated_at,
-        'expires_at',a.expires_at,'parent_account_id',a.parent_account_id,
-        'credentials',a.credentials,
-        'proxy',case when p.id is null then null else json_build_object(
-            'protocol',p.protocol,'host',p.host,'port',p.port,
-            'username',p.username,'password',p.password) end)
-        from accounts a left join proxies p on p.id=a.proxy_id
-        where a.id=%d and a.deleted_at is null
-        and a.platform='openai' and a.type='apikey'""" % account_id
-    raw = subprocess.run(
-        ["docker", "exec", config.db_container, "psql", "-U", "sub2api",
-         "-d", "sub2api", "-Atc", sql],
-        capture_output=True, timeout=12, check=True,
-    ).stdout
-    if not raw.strip():
-        raise BridgeError(404, "account not found")
-    if len(raw) > MAX_RESPONSE_BYTES:
-        raise BridgeError(502, "account response too large")
-    account = json.loads(raw)
+    if type(account_id) is not int or not 0 < account_id < 10 ** 18:
+        raise BridgeError(404, "not found")
+    if config.db_mode == "docker":
+        # Explicit migration fallback only. The default direct mode never starts
+        # a subprocess or needs Docker access. The same projected view and
+        # configured readonly role are used in either mode.
+        raw = subprocess.run(
+            ["docker", "exec", config.db_container, "psql", "-X", "-v",
+             "ON_ERROR_STOP=1", "-U", config.db_user, "-d", config.db_name,
+             "-Atc", ACCOUNT_SQL.replace("%s", str(account_id))],
+            capture_output=True, timeout=12, check=True,
+        ).stdout
+        if not raw.strip():
+            raise BridgeError(404, "account not found")
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise BridgeError(502, "account response too large")
+        account = json.loads(raw)
+    else:
+        with database_pool(config).connection() as connection:
+            with connection.execute(ACCOUNT_SQL, (account_id,)) as cursor:
+                row = cursor.fetchone()
+        if not row:
+            raise BridgeError(404, "account not found")
+        account = row[0]
+        if len(json.dumps(account).encode()) > MAX_RESPONSE_BYTES:
+            raise BridgeError(502, "account response too large")
     if (not isinstance(account, dict) or account.get("id") != account_id
             or account.get("platform") != "openai"
             or account.get("type") != "apikey"
@@ -140,6 +292,11 @@ def database_account(config: Config, account_id: int) -> dict:
             or not account.get("updated_at")
             or not isinstance(account.get("credentials"), dict)):
         raise BridgeError(409, "account snapshot changed")
+    # Never forward extra credential keys even if a DBA replaces the view.
+    account["credentials"] = {
+        key: value for key, value in account["credentials"].items()
+        if key in ("api_key", "base_url", "model_mapping")
+    }
     return account
 
 
@@ -179,6 +336,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         supplied = self.headers.get("x-bridge-token", "")
         if not hmac.compare_digest(supplied.encode(), config.token.encode()):
             return self.reply(403, {"error": "bridge authorization required"})
+        if self.path == "/healthz":
+            return self.reply(200, {"ok": True})
         match = ACCOUNT_PATH.fullmatch(self.path)
         if not match:
             return self.reply(404, {"error": "not found"})
@@ -230,6 +389,7 @@ class Server(socketserver.UnixStreamServer):
     def server_close(self):
         super().server_close()
         self.pool.shutdown(wait=True)
+        close_database_pools()
 
 
 def prepare_socket(path: Path):
@@ -277,7 +437,8 @@ def main():
         prepare_socket(socket_path)
         with Server(socket_path, config) as server:
             owned_socket = socket_path.stat()
-            os.chown(socket_path, config.uid, config.gid)
+            if (owned_socket.st_uid, owned_socket.st_gid) != (config.uid, config.gid):
+                os.chown(socket_path, config.uid, config.gid)
             os.chmod(socket_path, 0o600)
             signal.signal(signal.SIGTERM, stop_server)
             try:

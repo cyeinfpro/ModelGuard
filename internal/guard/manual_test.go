@@ -35,7 +35,7 @@ func TestManualBatchContinuesAfterAccountError(t *testing.T) {
 		if target.AccountID == 1 {
 			return nil, "", errors.New("probe failed")
 		}
-		return &fingerprint.Analysis{Decision: "match"}, "pass", nil
+		return &fingerprint.Analysis{Decision: "match", Used: 3}, "pass", nil
 	}
 	e.runManual(context.Background(), "batch")
 	if a.reads != 2 || e.Store.State.Manual.Completed != 2 || e.Store.State.Manual.Errors != 1 || e.Store.State.Manual.Status != "completed_with_errors" {

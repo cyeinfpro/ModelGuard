@@ -124,7 +124,7 @@ func TestLegacyProtectionMigratesWithTwoFreshPasses(t *testing.T) {
 			tick(t, e)
 			*v = "match"
 			r := e.Store.State.Records[1]
-			r.Status = status
+			r.Status = Status(status)
 			r.PauseUpdatedAt = ""
 			r.RecoveryPasses = 1
 			before := *calls
@@ -153,14 +153,14 @@ func TestManagedReadFailureNeverRestores(t *testing.T) {
 		t.Fatal("read error authorized recovery")
 	}
 }
-func TestUnavailableNeverIsolatesEvenWithLegacyOptIn(t *testing.T) {
+func TestInconclusiveNeverIsolatesEvenWithLegacyOptIn(t *testing.T) {
 	e, a, v, _ := fixture(t)
 	*v = "indeterminate"
 	for i := 0; i < 3; i++ {
 		tick(t, e)
 	}
 	r := e.Store.State.Records[1]
-	if a.pauses != 0 || r.Failures != 0 || r.Unavailable != 3 {
+	if a.pauses != 0 || r.Failures != 0 || r.Unavailable != 0 || r.Inconclusive != 3 {
 		t.Fatal("unavailable treated as mismatch")
 	}
 	e.Config.PauseUnavailable = true
@@ -177,7 +177,7 @@ func TestUnavailableRetainsMismatchEvidenceWithoutActingOnIt(t *testing.T) {
 	e.Config.AutoPause = true
 	tick(t, e)
 	r := e.Store.State.Records[1]
-	if a.pauses != 0 || r.Failures != 1 || r.Unavailable != 1 {
+	if a.pauses != 0 || r.Failures != 1 || r.Unavailable != 0 || r.Inconclusive != 1 {
 		t.Fatal("unknown outcome erased evidence or triggered a mismatch pause")
 	}
 	*v = "match"
@@ -310,7 +310,7 @@ func TestAdminRedirectNeverLeaksKey(t *testing.T) {
 	received := false
 	to := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { received = true }))
 	defer to.Close()
-	from := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, to.URL, 302) }))
+	from := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, to.URL, http.StatusFound) }))
 	defer from.Close()
 	c := DefaultConfig()
 	c.AdminURL = from.URL
@@ -368,9 +368,8 @@ func TestOAuthProbePinsIdentityAndCustomChallenge(t *testing.T) {
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(upstream.URL, "https://"))
 	}
-	pool := &ClientPool{entries: map[string]*http.Transport{"": transport}}
-	defer pool.Close()
-	p := &Prober{Pool: pool, Resolve: func(ctx context.Context, id int64) (Identity, error) {
+	defer transport.CloseIdleConnections()
+	p := &Prober{TransportTemplate: transport, Resolve: func(ctx context.Context, id int64) (Identity, error) {
 		if id != 123 {
 			t.Fatal("wrong account identity")
 		}

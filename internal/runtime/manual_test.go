@@ -24,6 +24,7 @@ func TestManualCommandNeedsLiveSaveThenCommittedDiagnostic(t *testing.T) {
 	}))
 	defer s.Close()
 	_, p := grpcFixture(t)
+	defer p.Close() // Join the engine before t.TempDir cleanup removes its state directory.
 	// No host identity is provided: this test only verifies command delivery.
 	c := guard.DefaultConfig()
 	c.AdminURL = s.URL
@@ -119,22 +120,55 @@ func TestDiscoveryFailureRetainsLastKnownList(t *testing.T) {
 		t.Fatal("temporary error erased account list")
 	}
 }
-func TestScheduledBatchPreventsDestructiveConfigRestart(t *testing.T) {
+func TestScheduledBatchAllowsSoftConfigButPreventsHardRestart(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/admin/accounts/1" {
+			close(started)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			w.Write([]byte(`{"code":0,"data":{"id":1,"platform":"openai","type":"oauth","status":"active","schedulable":false}}`))
+			return
+		}
+		w.Write([]byte(`{"code":0,"data":{"items":[],"total":0,"page":1,"pages":0}}`))
+	}))
+	defer server.Close()
+	defer close(release)
 	_, p := grpcFixture(t)
+	defer p.Close() // Cancel and join the blocked request before temporary state cleanup.
 	c := guard.DefaultConfig()
-	c.DataDir = t.TempDir()
+	c.AdminURL, c.AdminKey, c.DataDir = server.URL, "test", t.TempDir()
 	c.Targets = []guard.Target{{AccountID: 1, Model: "gpt-6.1-terra", Expected: "gpt-6.1-terra", Enabled: true}}
 	raw, _ := json.Marshal(c)
 	if r, _ := p.ApplyConfig(context.Background(), &v1.ApplyConfigRequest{ConfigJson: raw}); !r.Applied {
 		t.Fatal(r)
 	}
 	before := p.engine
-	p.engine.BatchBusy.Store(true)
-	defer p.engine.BatchBusy.Store(false)
+	grace := uniqueTopLevelKeys(t, before.Snapshot())["startup_ready_at"]
+	if err := before.RequestManual("blocked-administrative-read"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("administrative read did not start")
+	}
 	c.NormalSeconds += 300
 	raw, _ = json.Marshal(c)
 	r, _ := p.ApplyConfig(context.Background(), &v1.ApplyConfigRequest{ConfigJson: raw})
+	if !r.Applied || p.engine != before || p.engine.CurrentConfig().NormalSeconds != c.NormalSeconds {
+		t.Fatal("soft settings did not update the live engine", r)
+	}
+	if string(grace) != string(uniqueTopLevelKeys(t, before.Snapshot())["startup_ready_at"]) {
+		t.Fatal("soft settings restarted grace")
+	}
+	c.AdminKey = "changed-authority"
+	raw, _ = json.Marshal(c)
+	r, _ = p.ApplyConfig(context.Background(), &v1.ApplyConfigRequest{ConfigJson: raw})
 	if r.Applied || p.engine != before {
-		t.Fatal("running batch was silently restarted")
+		t.Fatal("hard change replaced a running batch", r)
 	}
 }

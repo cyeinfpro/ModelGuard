@@ -25,8 +25,7 @@ func TestAPIProbeUsesSpecificUpstreamKeyModelAndResponsesPath(t *testing.T) {
 		w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"42,51,62\"}]}]}}\n\n"))
 	}))
 	defer server.Close()
-	p := Prober{Pool: &ClientPool{}}
-	defer p.Pool.Close()
+	p := Prober{}
 	a := Account{Type: "apikey", Credentials: map[string]any{"base_url": server.URL, "api_key": "private-test-key", "model_mapping": map[string]any{"sol": "upstream-sol"}}}
 	got, err := p.Sample(context.Background(), a, Target{Model: "sol"}, "probe")
 	if err != nil || got != "42,51,62" {

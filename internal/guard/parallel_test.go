@@ -3,7 +3,6 @@ package guard
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/cyeinfpro/ModelGuard/internal/fingerprint"
 	"strings"
 	"sync"
@@ -213,7 +212,7 @@ func TestParallelFirstMismatchPausesOnlyMatchingAccount(t *testing.T) {
 	for _, id := range []int64{1, 2, 3} {
 		a, _ := e.Admin.Account(context.Background(), id)
 		if a.Schedulable == (id == 2) {
-			t.Fatal(fmt.Sprintf("wrong account schedule %d", id))
+			t.Fatalf("wrong account schedule %d", id)
 		}
 	}
 	if !e.Store.State.Records[2].Hold || e.Store.State.Manual.Passed != 2 || e.Store.State.Manual.Mismatches != 1 {

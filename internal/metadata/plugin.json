@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "local.sub2api.account-guard",
+  "name": "模型哨兵",
+  "description": "持续并行巡检、明确判定、预算保护与可追溯的自动恢复。",
+  "author": "cyeinfpro",
+  "requires": {
+    "sub2api": ">=0.2.19 <0.3.0",
+    "recommended_sub2api_version": "0.2.19",
+    "plugin_protocol": 1,
+    "transport_api": 1,
+    "ui_bridge": 1
+  },
+  "capabilities": [
+    {
+      "id": "openai.oauth.outbound_transport.v1",
+      "platform": "openai",
+      "account_type": "oauth"
+    }
+  ],
+  "ui": {
+    "entrypoint": "ui/index.html"
+  }
+}

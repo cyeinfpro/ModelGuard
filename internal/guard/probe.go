@@ -10,9 +10,7 @@ import (
 	"github.com/cyeinfpro/ModelGuard/internal/fingerprint"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -39,131 +37,139 @@ type ProgressProbe interface {
 }
 type Prober struct {
 	Resolve ResolveIdentity
-	Pool    *ClientPool
+	// TransportTemplate is cloned for each sample; never a forwarding pool.
+	TransportTemplate *http.Transport
 }
 
-// Transports are shared by proxy, bounded and closed when no longer used.
-type ClientPool struct {
-	mu      sync.Mutex
-	entries map[string]*http.Transport
+// PreparedProbe separates local validation/identity lookup from quota reservation.
+type PreparedProbe interface {
+	Prepare(context.Context, Account, Target, string) (PreparedSample, error)
+}
+type PreparedSample interface {
+	Sample(context.Context, func(SampleProgress)) (string, error)
+}
+type preparedRequest struct {
+	request   *http.Request
+	transport *http.Transport
 }
 
-func (p *ClientPool) Client(proxy string) (*http.Client, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.entries == nil {
-		p.entries = map[string]*http.Transport{}
-	}
-	tr := p.entries[proxy]
-	if tr == nil {
-		tr = http.DefaultTransport.(*http.Transport).Clone()
-		tr.Proxy = nil
-		tr.DisableCompression = true
-		tr.MaxIdleConns = 16
-		tr.MaxIdleConnsPerHost = 4
-		tr.IdleConnTimeout = 60 * time.Second
-		tr.ResponseHeaderTimeout = 180 * time.Second
-		if proxy != "" {
-			u, err := url.Parse(proxy)
-			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
-				return nil, errors.New("代理地址无效")
-			}
-			tr.Proxy = http.ProxyURL(u)
-		}
-		if len(p.entries) >= 64 {
-			for k, t := range p.entries {
-				t.CloseIdleConnections()
-				delete(p.entries, k)
-				break
-			}
-		}
-		p.entries[proxy] = tr
-	}
-	return &http.Client{Transport: tr, CheckRedirect: NoRedirect}, nil
-}
-func (p *ClientPool) Close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, t := range p.entries {
-		t.CloseIdleConnections()
-	}
-}
 func (p *Prober) Sample(ctx context.Context, a Account, t Target, prompt string) (string, error) {
 	return p.SampleWithProgress(ctx, a, t, prompt, nil)
 }
 func (p *Prober) SampleWithProgress(ctx context.Context, a Account, t Target, prompt string, progress func(SampleProgress)) (string, error) {
-	report := func(phase string) {
-		if progress != nil {
-			progress(SampleProgress{Phase: phase})
-		}
+	if progress != nil {
+		progress(SampleProgress{Phase: "identity"})
 	}
-	report("identity")
+	prepared, err := p.Prepare(ctx, a, t, prompt)
+	if err != nil {
+		return "", err
+	}
+	return prepared.Sample(ctx, progress)
+}
+
+func (p *Prober) Prepare(ctx context.Context, a Account, t Target, prompt string) (PreparedSample, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	endpoint := "https://chatgpt.com/backend-api/codex/responses"
 	id := Identity{Headers: http.Header{}}
-	if a.Type == "oauth" {
+	switch a.Type {
+	case "oauth":
 		if p.Resolve == nil {
-			return "", configurationError("宿主不支持账号身份解析")
+			return nil, configurationError("宿主不支持账号身份解析")
 		}
 		var err error
 		id, err = p.Resolve(ctx, a.ID)
 		if err != nil {
-			return "", configurationError("宿主无法解析账号出站身份")
+			return nil, configurationError("宿主无法解析账号出站身份")
 		}
-	} else if a.Type == "apikey" {
+	case "apikey":
 		var err error
 		endpoint, err = apiResponsesURL(credential(a, "base_url"))
 		if err != nil {
-			return "", configurationError(err.Error())
+			return nil, configurationError(err.Error())
 		}
-		id.Token = credential(a, "api_key")
-		id.Proxy = a.OutboundProxy
-	} else {
-		return "", configurationError("账号类型不支持")
+		id.Token, id.Proxy = credential(a, "api_key"), a.OutboundProxy
+	default:
+		return nil, configurationError("账号类型不支持")
 	}
-
-	if id.Token == "" {
-		return "", configurationError("账号没有可用出站凭据")
-	}
-	if id.Headers == nil {
-		id.Headers = http.Header{}
+	if strings.TrimSpace(id.Token) == "" {
+		return nil, configurationError("账号没有可用出站凭据")
 	}
 	model := t.Model
 	if a.Type == "apikey" {
 		model = mappedModel(a, model)
 	}
+	if strings.TrimSpace(model) == "" {
+		return nil, configurationError("请求模型不能为空")
+	}
 	payload := map[string]any{"model": model, "input": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": prompt}}}}, "instructions": "You are a helpful assistant.", "stream": true, "store": false}
-	b, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
+	b, err := json.Marshal(payload)
 	if err != nil {
-		return "", errors.New("无法创建探测请求")
+		return nil, configurationError("无法编码探测请求")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
+	if err != nil {
+		return nil, configurationError("无法创建探测请求")
 	}
 	req.Header = id.Headers.Clone()
+	if req.Header == nil {
+		req.Header = http.Header{}
+	}
 	req.Header.Set("Authorization", "Bearer "+id.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	if a.Type == "oauth" && req.Header.Get("OpenAI-Beta") == "" {
 		req.Header.Set("OpenAI-Beta", "responses=experimental")
 	}
-	client, err := p.Pool.Client(id.Proxy)
+	// Validate header bytes before quota is reserved; net/http otherwise fails locally.
+	for k, values := range req.Header {
+		if !validHeaderName(k) {
+			return nil, configurationError("出站请求头名称无效")
+		}
+		for _, value := range values {
+			if !validHeaderValue(value) {
+				return nil, configurationError("出站请求头值无效")
+			}
+		}
+	}
+	transport, err := newTransport(id.Proxy)
 	if err != nil {
+		return nil, configurationError("代理地址无效")
+	}
+	// Probes never enter the production connection pool or reuse a previous sample.
+	if p.TransportTemplate != nil {
+		template := p.TransportTemplate.Clone()
+		template.Proxy = transport.Proxy
+		template.ResponseHeaderTimeout = 0
+		transport = template
+	}
+	transport.DisableKeepAlives = true
+	return &preparedRequest{request: req, transport: transport}, nil
+}
+func (p *preparedRequest) Sample(ctx context.Context, progress func(SampleProgress)) (string, error) {
+	defer p.transport.CloseIdleConnections()
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	// Each fingerprint sample uses a fresh connection. Do not carry a partially
-	// consumed SSE connection (or business traffic transport) into the next sample.
-	transport := client.Transport.(*http.Transport).Clone()
-	transport.DisableKeepAlives = true
-	defer transport.CloseIdleConnections()
-	client = &http.Client{Transport: transport, CheckRedirect: NoRedirect}
-	report("connecting")
-	res, err := client.Do(req)
+	if progress != nil {
+		progress(SampleProgress{Phase: "connecting"})
+	}
+	client := &http.Client{Transport: p.transport, CheckRedirect: NoRedirect}
+	res, err := client.Do(p.request.WithContext(ctx))
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", errors.New("上游连接失败或超时")
 	}
 	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return "", fmt.Errorf("上游 HTTP %d", res.StatusCode)
+	if res.StatusCode != http.StatusOK {
+		return "", upstreamResponseError(res)
 	}
-	report("receiving")
+	if progress != nil {
+		progress(SampleProgress{Phase: "receiving"})
+	}
 	answer, err := readResponsesProgress(res.Body, progress)
 	if err != nil && ctx.Err() != nil {
 		return "", errors.New("采样超时，未收到完整 response.completed")
@@ -285,14 +291,24 @@ func readResponsesProgress(body io.Reader, progress func(SampleProgress)) (strin
 
 func Evaluate(ctx context.Context, account Account, t Target, c Config, probe Probe, detector *fingerprint.Detector, reserve func(bool) error) (*fingerprint.Analysis, string, error) {
 	samples := make([]fingerprint.Output, 0, 3)
+	unavailable := func(reason string) (*fingerprint.Analysis, string, error) {
+		return &fingerprint.Analysis{Decision: "indeterminate", Expected: t.Expected, Used: len(samples), Diagnostic: reason, Version: detector.Version()}, reason, nil
+	}
 	for index, ch := range newFingerprintChallenges() {
 		var failure string
+		var previous error
 		for attempt := 1; attempt <= 3; attempt++ {
 			if err := ctx.Err(); err != nil {
 				return nil, "", err
 			}
 			if attempt > 1 {
-				delay := time.Duration(attempt-1) * time.Second
+				delay, allowed := probeRetryDelay(previous, attempt)
+				if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+					allowed = false
+				}
+				if !allowed {
+					return unavailable(fmt.Sprintf("第 %d/3 份样本：%s；限流等待超过本轮可用时间，稍后重试", index+1, failure))
+				}
 				if observer, ok := probe.(retryObserver); ok {
 					if err := observer.Retry(ctx, account, index+1, attempt, failure, delay); err != nil {
 						return nil, "", err
@@ -301,15 +317,39 @@ func Evaluate(ctx context.Context, account Account, t Target, c Config, probe Pr
 					return nil, "", err
 				}
 			}
-			if err := reserve(attempt > 1); err != nil {
-				return nil, "", err
-			}
 			sub, cancel := context.WithTimeout(ctx, time.Duration(c.TimeoutSeconds)*time.Second)
 			sub = context.WithValue(sub, sampleAttemptKey{}, sampleAttempt{Index: index + 1, Attempt: attempt})
-			answer, err := probe.Sample(sub, account, t, ch.Prompt)
+			var prepared PreparedSample
+			var err error
+			if preparer, ok := probe.(PreparedProbe); ok {
+				prepared, err = preparer.Prepare(sub, account, t, ch.Prompt)
+			}
+			// All identity/endpoint/proxy/header validation precedes budget accounting.
+			// Reservation remains conservative immediately before Do: an ambiguous
+			// connection failure is never refunded and cannot cause a quota overrun.
+			var answer string
+			if err == nil {
+				if err = sub.Err(); err == nil {
+					if budgetErr := reserve(attempt > 1); budgetErr != nil {
+						cancel()
+						return nil, "", budgetErr
+					}
+				}
+				if err == nil {
+					if prepared != nil {
+						answer, err = prepared.Sample(sub, nil)
+					} else {
+						answer, err = probe.Sample(sub, account, t, ch.Prompt)
+					}
+				}
+			}
 			cancel()
 			if ctx.Err() != nil {
 				return nil, "", ctx.Err()
+			}
+			var configErr *ProbeConfigurationError
+			if errors.As(err, &configErr) {
+				return nil, "", err
 			}
 			output := fingerprint.Output{Text: answer, ExpectedCount: ch.ExpectedCount}
 			failure = ""
@@ -325,17 +365,13 @@ func Evaluate(ctx context.Context, account Account, t Target, c Config, probe Pr
 				samples = append(samples, output)
 				break
 			}
+			previous = err
 			if attempt == 3 {
-				reason := fmt.Sprintf("第 %d/3 份样本重试 2 次后仍失败：%s；本轮不作指纹判定，稍后自动重试", index+1, failure)
-				var configErr *ProbeConfigurationError
-				if errors.As(err, &configErr) {
-					return nil, "", configurationError(reason)
-				}
-				return &fingerprint.Analysis{Decision: "indeterminate", Expected: t.Expected, Used: len(samples), Diagnostic: reason, Version: detector.Version()}, reason, nil
+				return unavailable(fmt.Sprintf("第 %d/3 份样本重试 2 次后仍失败：%s；本轮不作指纹判定，稍后自动重试", index+1, failure))
 			}
 		}
 	}
-	analysis, err := detector.Analyze(samples, t.Expected)
+	analysis, err := detector.AnalyzeWithOptions(samples, t.Expected, fingerprint.AnalyzeOptions{FamilyMatch: c.FamilyMatch})
 	if err != nil {
 		return nil, "指纹评分失败，稍后自动重试", nil
 	}

@@ -33,7 +33,7 @@ func grpcFixture(t *testing.T) (v1.TransportPluginClient, *Plugin) {
 	return v1.NewTransportPluginClient(conn), p
 }
 func TestForwardPreservesBodyHeadersStatusAndChunks(t *testing.T) {
-	api, _ := grpcFixture(t)
+	api, p := grpcFixture(t)
 	payload := `{"model":"gpt-6.1-terra","input":"untouched"}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -83,6 +83,10 @@ func TestForwardPreservesBodyHeadersStatusAndChunks(t *testing.T) {
 	if !started || !ended || body.String() != "data: one\n\ndata: two\n\n" {
 		t.Fatal("stream altered")
 	}
+	metrics := p.forwardStats.snapshot()
+	if metrics.Requests != 1 || metrics.InFlight != 0 || metrics.Completed != 1 || metrics.HTTPStatusClasses["4xx"] != 1 || metrics.FirstByteSamples != 1 || len(metrics.Errors) != 0 {
+		t.Fatalf("forward transport accounting incorrect: %+v", metrics)
+	}
 }
 func TestForwardCancellationReachesUpstream(t *testing.T) {
 	api, _ := grpcFixture(t)
@@ -107,12 +111,19 @@ func TestForwardCancellationReachesUpstream(t *testing.T) {
 	}
 }
 func TestMalformedStartIsDefinitelyUnsent(t *testing.T) {
-	api, _ := grpcFixture(t)
+	api, p := grpcFixture(t)
 	stream, _ := api.Forward(context.Background())
 	stream.Send(&v1.ForwardRequest{Frame: &v1.ForwardRequest_BodyEnd{BodyEnd: true}})
 	r, err := stream.Recv()
 	if err != nil || r.GetError() == nil || r.GetError().RequestSent {
 		t.Fatal("invalid request marked sent")
+	}
+	if _, err = stream.Recv(); err != io.EOF {
+		t.Fatalf("terminal malformed stream: %v", err)
+	}
+	metrics := p.forwardStats.snapshot()
+	if metrics.Requests != 1 || metrics.InFlight != 0 || metrics.Completed != 0 || metrics.Errors["invalid_start"] != 1 || metrics.FirstByteSamples != 0 {
+		t.Fatalf("unsent failure accounting incorrect: %+v", metrics)
 	}
 }
 func TestRealGRPCConfigAndHealth(t *testing.T) {

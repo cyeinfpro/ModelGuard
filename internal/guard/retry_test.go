@@ -62,7 +62,7 @@ func TestExistingIsolationFailureRetriesSoonWithoutLosingOwnership(t *testing.T)
 	*v = "indeterminate"
 	tick(t, e)
 	r := e.Store.State.Records[1]
-	if !r.Hold || r.Status != "unavailable" || r.RecoveryPasses != 0 || a.pauses != 1 || a.resumes != 0 || r.NextAt.Sub(r.CheckedAt) != time.Duration(e.Config.RetrySeconds)*time.Second {
+	if !r.Hold || r.Status != "inconclusive" || r.RecoveryPasses != 0 || a.pauses != 1 || a.resumes != 0 || r.NextAt.Sub(r.CheckedAt) != time.Duration(e.Config.RetrySeconds)*time.Second {
 		t.Fatal("failure misclassified or delayed six hours", r)
 	}
 	*v = "match"

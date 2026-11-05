@@ -2,8 +2,6 @@ package runtime
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,24 +40,10 @@ type bridgeInstallation struct {
 	Message string
 }
 
-// Passive metadata checks cannot prove a live service or valid credentials.
-// Only a real account probe can verify those, without an extra paid probe here.
-func inspectBridge(dir string) bridgeInstallation {
-	socket, err := os.Lstat(filepath.Join(dir, "api-bridge.sock"))
-	if os.IsNotExist(err) {
-		return bridgeInstallation{"missing", "尚未安装本机 API 桥接；OAuth 账号不受影响"}
+func connectionStatusForInterval(c guard.Config, count int, lastError string, loading bool, checked, updated, now time.Time, interval time.Duration) ConnectionStatus {
+	if interval <= 0 {
+		interval = baseDiscoveryInterval(c)
 	}
-	if err != nil || socket.Mode()&os.ModeSocket == 0 {
-		return bridgeInstallation{"incomplete", "本机 API 桥接 Socket 不可用；请检查桥接服务"}
-	}
-	token, err := os.Lstat(filepath.Join(dir, "api-bridge.token"))
-	if err != nil || !token.Mode().IsRegular() || token.Size() == 0 || token.Mode().Perm()&0077 != 0 {
-		return bridgeInstallation{"incomplete", "桥接令牌缺失或权限不正确；请按安装文档修复"}
-	}
-	return bridgeInstallation{"installed", "桥接文件已就绪；服务连通性和账号权限将在检测时验证"}
-}
-
-func connectionStatus(c guard.Config, count int, lastError string, loading bool, checked, updated, now time.Time) ConnectionStatus {
 	s := ConnectionStatus{AccountCount: count, CheckedAt: checked, LastSuccessAt: updated}
 	switch {
 	case strings.TrimSpace(c.AdminKey) == "":
@@ -74,7 +58,7 @@ func connectionStatus(c guard.Config, count int, lastError string, loading bool,
 	case updated.IsZero():
 		s.State, s.Code = "checking", "connection_unverified"
 		s.Message, s.NextAction = "连接信息已保存，尚未验证", "加载账号以验证管理地址和读取权限"
-	case now.Sub(updated) > 45*time.Second:
+	case now.Sub(updated) > 3*interval:
 		s.State, s.Code = "stale", "accounts_stale"
 		s.Message, s.NextAction = "显示最近一次账号列表，更新尚未完成", "可重新加载账号；现有列表会保留"
 	default:
@@ -118,6 +102,14 @@ func connectionNextAction(code string) string {
 }
 
 func readinessStatus(c guard.Config, accounts []guard.AccountOption, connection ConnectionStatus, host bool, bridge bridgeInstallation, runtimeError string) ReadinessStatus {
+	byID := make(map[int64]guard.AccountOption, len(accounts))
+	for _, a := range accounts {
+		byID[a.ID] = a
+	}
+	return readinessStatusWithIndex(c, byID, connection, host, bridge, runtimeError)
+}
+
+func readinessStatusWithIndex(c guard.Config, byID map[int64]guard.AccountOption, connection ConnectionStatus, host bool, bridge bridgeInstallation, runtimeError string) ReadinessStatus {
 	s := ReadinessStatus{State: "ready", NextAction: "保存账号与策略后开始首轮检测", Checks: []ReadinessCheck{}}
 	add := func(check ReadinessCheck) {
 		s.Checks = append(s.Checks, check)
@@ -146,10 +138,6 @@ func readinessStatus(c guard.Config, accounts []guard.AccountOption, connection 
 			s.State, s.NextAction = "choose_accounts", "勾选账号，确认请求模型与预期指纹"
 		}
 		return s
-	}
-	byID := make(map[int64]guard.AccountOption, len(accounts))
-	for _, a := range accounts {
-		byID[a.ID] = a
 	}
 	var missing, unsupported, oauth, api, inactive []int64
 	for _, id := range selected {
@@ -181,12 +169,12 @@ func readinessStatus(c guard.Config, accounts []guard.AccountOption, connection 
 	}
 	if len(api) > 0 {
 		switch {
-		case c.AdminURL != "http://127.0.0.1:8080" && c.AdminURL != "http://localhost:8080":
-			add(ReadinessCheck{Code: "api_bridge_address", State: "blocked", Label: "API 检测通道", Message: "API 桥接要求本机 Sub2API 管理地址", NextAction: "按桥接文档使用 http://127.0.0.1:8080 或 http://localhost:8080", AccountIDs: api})
+		case !guard.IsLoopbackAdminURL(c.AdminURL):
+			add(ReadinessCheck{Code: "api_bridge_address", State: "blocked", Label: "API 检测通道", Message: "API 桥接要求本机 Sub2API 管理地址", NextAction: "使用本机 loopback 管理地址与实际监听端口", AccountIDs: api})
 		case bridge.State != "installed":
 			add(ReadinessCheck{Code: "api_bridge_" + bridge.State, State: "blocked", Label: "API 检测通道", Message: bridge.Message, NextAction: "安装或修复本机 API 桥接，也可先只选择 OAuth 账号", AccountIDs: api})
 		default:
-			add(ReadinessCheck{Code: "api_bridge_installed", State: "warning", Label: "API 检测通道", Message: bridge.Message, NextAction: "首轮检测将验证桥接与上游 Responses API", AccountIDs: api})
+			add(ReadinessCheck{Code: "api_bridge_installed", State: "ready", Label: "API 检测通道", Message: bridge.Message, NextAction: "首轮检测将验证账号权限与上游 Responses API", AccountIDs: api})
 		}
 	}
 	if len(inactive) > 0 {

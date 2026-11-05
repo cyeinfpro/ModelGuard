@@ -84,6 +84,8 @@ with tempfile.TemporaryDirectory(prefix=".package-check-", dir=build) as directo
             for name in (
                 "ui/index.html", "ui/app.js", "ui/style.css",
                 "docs/API-BRIDGE.md", "scripts/api-credential-bridge.py",
+                "scripts/api-bridge-readonly.sql", "scripts/api-bridge.Dockerfile",
+                "scripts/modelguard-api-bridge.service",
             ):
                 if package.read(name) != (root / name).read_bytes():
                     raise SystemExit(f"Package does not contain current source: {name}")

@@ -1,0 +1,11 @@
+{
+  "oauth_model": "gpt-6.1-terra",
+  "oauth_expected": "gpt-6.1-terra",
+  "api_model": "gpt-6.1-sol",
+  "api_expected": "gpt-6-astra",
+  "model_aliases": {
+    "gpt-6.1-sol": "gpt-6-astra",
+    "gpt-6.1": "gpt-6-astra",
+    "gpt-6-astra/6.1-sol": "gpt-6-astra"
+  }
+}

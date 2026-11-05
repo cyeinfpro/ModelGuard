@@ -13,8 +13,14 @@ import (
 // The host currently binds only OAuth transport plugins. This path implements
 // that contract in full; monitoring never changes request bodies or identities.
 func (p *Plugin) Forward(stream grpc.BidiStreamingServer[v1.ForwardRequest, v1.ForwardResponse]) error {
-	fail := func(code string, sent bool) error {
-		return stream.Send(&v1.ForwardResponse{Frame: &v1.ForwardResponse_Error{Error: &v1.ForwardResponseError{Code: code, Message: code, RequestSent: sent}}})
+	p.forwardStats.begin()
+	code := "request_stream_error"
+	status := 0
+	var firstByte time.Duration
+	defer func() { p.forwardStats.finish(code, status, firstByte) }()
+	fail := func(errorCode string, sent bool) error {
+		code = errorCode
+		return stream.Send(&v1.ForwardResponse{Frame: &v1.ForwardResponse_Error{Error: &v1.ForwardResponseError{Code: errorCode, Message: errorCode, RequestSent: sent}}})
 	}
 	first, err := stream.Recv()
 	if err != nil {
@@ -89,6 +95,9 @@ func (p *Plugin) Forward(stream grpc.BidiStreamingServer[v1.ForwardRequest, v1.F
 		return fail("upstream_transport_error", true)
 	}
 	defer res.Body.Close()
+	status = res.StatusCode
+	firstByte = time.Since(began)
+	code = "response_stream_error"
 	h := map[string]*v1.HeaderValues{}
 	for k, v := range res.Header {
 		h[k] = &v1.HeaderValues{Values: v}
@@ -113,5 +122,9 @@ func (p *Plugin) Forward(stream grpc.BidiStreamingServer[v1.ForwardRequest, v1.F
 			return fail("upstream_read_error", true)
 		}
 	}
-	return stream.Send(&v1.ForwardResponse{Frame: &v1.ForwardResponse_End{End: &v1.ForwardResponseEnd{BytesReceived: total, DurationMs: time.Since(began).Milliseconds()}}})
+	err = stream.Send(&v1.ForwardResponse{Frame: &v1.ForwardResponse_End{End: &v1.ForwardResponseEnd{BytesReceived: total, DurationMs: time.Since(began).Milliseconds()}}})
+	if err == nil {
+		code = ""
+	}
+	return err
 }

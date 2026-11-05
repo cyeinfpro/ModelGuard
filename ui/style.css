@@ -242,3 +242,12 @@ footer{order:7;padding:3px 8px 10px;font-size:10px;color:var(--muted);text-align
  .step-link[data-current=true]{border-color:#435d91}.step-link[data-current=true]>span{color:#111}
  input:hover,select:hover{border-color:#657187}
 }
+
+
+/* Incremental status details and explicit policy controls. */
+.tag.uncertain{background:var(--warn-soft);color:var(--warn)}
+.candidate-list{display:block;margin-top:6px;font-size:11px;color:var(--muted);line-height:1.7;overflow-wrap:anywhere}
+.family-policy{margin-top:18px}
+#windowStats{font-variant-numeric:tabular-nums}
+#stopNow{font-size:12px}
+@media(max-width:600px){#stopNow{order:3;grid-column:1/-1}}

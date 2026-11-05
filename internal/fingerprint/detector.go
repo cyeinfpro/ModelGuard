@@ -7,13 +7,14 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cyeinfpro/ModelGuard/internal/metadata"
 	"math"
 	"regexp"
 	"sort"
-	"strings"
 )
 
 //go:embed data/shared_detector.bin
@@ -145,6 +146,9 @@ func Decode(data, meta []byte) (*Detector, error) {
 		if artifact.ModelIDs[i] != m.ID {
 			return nil, errors.New("detector model order mismatch")
 		}
+	}
+	if err := validateCalibration(artifact); err != nil {
+		return nil, err
 	}
 	pos := (4 + nh + 3) &^ 3
 	if pos > len(data) || (len(data)-pos)%4 != 0 {
@@ -446,6 +450,7 @@ type Candidate struct {
 	Score       float64 `json:"score"`
 }
 type Analysis struct {
+	MatchScope string      `json:"match_scope,omitempty"`
 	Decision   string      `json:"decision"` // match, mismatch, indeterminate
 	Predicted  string      `json:"predicted,omitempty"`
 	Expected   string      `json:"expected,omitempty"`
@@ -523,18 +528,7 @@ func sequenceLike(numbers [][]int) bool {
 	}
 	return median(autocorr) <= -.23 && median(steps) <= .05
 }
-func canonicalExpected(raw string) string {
-	s := strings.ToLower(strings.TrimSpace(raw))
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		s = s[i+1:]
-	}
-	switch s {
-	case "gpt-6.1-sol", "gpt-6.1", "gpt-6-astra/6.1-sol":
-		return "gpt-6-astra"
-	default:
-		return s
-	}
-}
+func canonicalExpected(raw string) string { return metadata.CanonicalExpected(raw) }
 
 // ResolveExpected maps a Magpie qualified model name to a known local
 // reference ID. An unsupported alias is never treated as a mismatch.
@@ -558,7 +552,12 @@ func ValidateOutput(o Output) (int, int) {
 	return n, minimum
 }
 
+type AnalyzeOptions struct{ FamilyMatch bool }
+
 func (d *Detector) Analyze(outputs []Output, expectedModel string) (Analysis, error) {
+	return d.AnalyzeWithOptions(outputs, expectedModel, AnalyzeOptions{})
+}
+func (d *Detector) AnalyzeWithOptions(outputs []Output, expectedModel string, options AnalyzeOptions) (Analysis, error) {
 	result := Analysis{Decision: "indeterminate", Expected: canonicalExpected(expectedModel), Version: d.Version()}
 	if len(outputs) != 3 {
 		result.Diagnostic = "必须完成三条独立数字挑战"
@@ -618,7 +617,12 @@ func (d *Detector) Analyze(outputs []Output, expectedModel string) (Analysis, er
 	}
 	if order[0] == expectedIndex {
 		result.Decision = "match"
+		result.MatchScope = "model"
 		result.Diagnostic = "当前最相似模型与预期类别一致（不代表身份验证）"
+	} else if options.FamilyMatch && len(order) > 1 && order[1] == expectedIndex && d.meta.Models[order[0]].Family != "" && d.meta.Models[order[0]].Family == d.meta.Models[expectedIndex].Family {
+		result.Decision = "match"
+		result.MatchScope = "family"
+		result.Diagnostic = "家族一致：预期类别位于前两名（已启用家族级匹配，不代表身份验证）"
 	} else if result.Confidence >= .90 && probs[expectedIndex] < .03 {
 		result.Decision = "mismatch"
 		result.Diagnostic = "库内相对排序强烈偏离预期模型（仍可能误判）"
@@ -626,4 +630,31 @@ func (d *Detector) Analyze(outputs []Output, expectedModel string) (Analysis, er
 		result.Diagnostic = "候选模型接近，按无法可靠判定处理"
 	}
 	return result, nil
+}
+
+func validateCalibration(a Artifact) error {
+	c := a.Calibration
+	if !validArtifactHash(a.BaseSHA256) || !validArtifactHash(a.SourceReferenceSHA256) {
+		return errors.New("detector calibration hash binding missing or invalid")
+	}
+	if c == nil || c.Schema != "shared-confidence-v2" || c.Method != "ranking-temperature" || math.IsNaN(c.Tau) || math.IsInf(c.Tau, 0) || c.Tau < .001 || c.Tau > 1000 {
+		return errors.New("detector calibration missing or invalid")
+	}
+	if c.Binding.BaseSHA256 != a.BaseSHA256 || c.Binding.ReferenceSHA256 != a.SourceReferenceSHA256 || len(c.Binding.ModelIDs) != len(a.ModelIDs) || len(a.ModelIDs) == 0 {
+		return errors.New("detector calibration binding mismatch")
+	}
+	for i, id := range a.ModelIDs {
+		if c.Binding.ModelIDs[i] != id {
+			return errors.New("detector calibration model order mismatch")
+		}
+	}
+	return nil
+}
+
+func validArtifactHash(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }

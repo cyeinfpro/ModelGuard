@@ -27,12 +27,9 @@ func (p *sampleRecorder) Retry(ctx context.Context, a Account, index, attempt in
 	e.stateMu.Lock()
 	e.activeSamples[a.ID] = &ActiveSample{AccountID: a.ID, Index: index, Attempt: attempt, StartedAt: time.Now().UTC(), TimeoutSeconds: int(delay.Seconds()), SampleProgress: SampleProgress{Phase: "retry_wait"}}
 	e.Store.Event(a.ID, "sample_retry", fmt.Sprintf("第 %d/3 份样本：%s；%d 秒后重试（%d/2）", index, reason, int(delay.Seconds()), attempt-1), time.Now().UTC())
-	err := e.save()
-	e.publishLocked("")
+	e.markStateDirtyLocked()
 	e.stateMu.Unlock()
-	if err == nil {
-		err = waitRetry(ctx, delay)
-	}
+	err := waitRetry(ctx, delay)
 	e.stateMu.Lock()
 	delete(e.activeSamples, a.ID)
 	e.publishLocked("")

@@ -8,11 +8,9 @@ import (
 	"time"
 )
 
-// RequestManual queues one bounded parallel round. The caller commits configuration first;
-// passive health, startup, and ordinary diagnostics never call this method.
+// RequestManual durably queues one explicitly requested round. Idle slots start
+// immediately, even when another scheduled account is still streaming.
 func (e *Engine) RequestManual(id string) error {
-	// Keep the global lock order stateMu -> mu (publishLocked). Holding mu
-	// while persisting would deadlock a worker publishing its progress.
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 	if e.stopped.Load() || e.Suspended.Load() {
@@ -21,20 +19,20 @@ func (e *Engine) RequestManual(id string) error {
 	if id == "" || id == e.lastManual {
 		return errors.New("此检测请求已处理，请重新点击立即检测")
 	}
-	count := 0
+	targets := []Target{}
 	for _, t := range e.targetsLocked() {
 		if t.Enabled {
-			count++
+			targets = append(targets, t)
 		}
 	}
-	if count == 0 {
+	if len(targets) == 0 {
 		return errors.New("请先选择至少一个检测账号并保存")
 	}
 	if len(e.manualQueue) > 0 || !e.ManualBusy.CompareAndSwap(false, true) {
 		return errors.New("已有检测任务正在执行")
 	}
 	previous := e.Store.State.Manual
-	e.Store.State.Manual = &ManualRun{ID: id, Status: "queued", Total: count, RequestedAt: time.Now().UTC(), Message: "已排队；当前巡检结束后开始"}
+	e.Store.State.Manual = &ManualRun{ID: id, Status: "queued", Total: len(targets), RequestedAt: time.Now().UTC(), Message: "已排队；有空闲名额时立即开始"}
 	if err := e.save(); err != nil {
 		e.Store.State.Manual = previous
 		e.ManualBusy.Store(false)
@@ -42,12 +40,82 @@ func (e *Engine) RequestManual(id string) error {
 		return err
 	}
 	e.lastManual = id
+	e.manualTargets = targets
 	e.ManualQueued.Store(true)
 	e.manualQueue <- id
+	e.wakeScheduler()
 	e.publishLocked("")
 	return nil
 }
 
+func (e *Engine) manualStartedLocked(run *ManualRun, id int64) {
+	for _, current := range run.CurrentIDs {
+		if current == id {
+			return
+		}
+	}
+	run.CurrentIDs = append(run.CurrentIDs, id)
+	sort.Slice(run.CurrentIDs, func(i, j int) bool { return run.CurrentIDs[i] < run.CurrentIDs[j] })
+	run.CurrentID = run.CurrentIDs[0]
+	e.markStateDirtyLocked()
+}
+func (e *Engine) manualResultLocked(run *ManualRun, t Target, err error) {
+	run.CurrentIDs = withoutID(run.CurrentIDs, t.AccountID)
+	run.CurrentID = 0
+	if len(run.CurrentIDs) > 0 {
+		run.CurrentID = run.CurrentIDs[0]
+	}
+	run.Completed++
+	r := e.Store.State.Records[t.AccountID]
+	if err != nil || recordNeedsAttention(r) {
+		run.Errors++
+	}
+	switch {
+	case r == nil || r.Status == StatusSkipped || r.Status == StatusUnsupported || r.Status == StatusArchived || r.Status == "external_change" || r.Status == StatusPauseUncertain:
+		run.Skipped++
+	case r.Status == StatusInconclusive && err == nil:
+		run.Inconclusive++
+	case err != nil || r.Status == StatusUnavailable || r.Analysis == nil || r.Analysis.Used < 3 || r.CheckedAt.Before(run.RequestedAt):
+		run.Unavailable++
+	case r.Analysis.Decision == "match" || r.Analysis.Decision == "family_match":
+		run.Passed++
+	case r.Analysis.Decision == "mismatch":
+		run.Mismatches++
+	default:
+		run.Inconclusive++
+	}
+	e.markStateDirtyLocked()
+}
+func (e *Engine) finishManualLocked(run *ManualRun, interrupted bool) {
+	run.CurrentID = 0
+	run.CurrentIDs = nil
+	run.FinishedAt = time.Now().UTC()
+	if run.Status != "failed" {
+		run.Status = "completed"
+		run.Message = fmt.Sprintf("通过 %d · 不符 %d · 不确定 %d · 采样失败 %d · 跳过 %d", run.Passed, run.Mismatches, run.Inconclusive, run.Unavailable, run.Skipped)
+		if run.Errors > 0 {
+			run.Status = "completed_with_errors"
+		}
+		if interrupted {
+			run.Status = "interrupted"
+			run.Message = "检测已中断，可重新发起"
+		}
+	}
+	if err := e.save(); err != nil {
+		run.Status = "failed"
+		run.Message = err.Error()
+	}
+	e.ManualBusy.Store(false)
+	e.ManualQueued.Store(false)
+	if run.Status == "failed" {
+		e.publishLocked(run.Message)
+	} else {
+		e.publishLocked("")
+	}
+}
+
+// Synchronous entry point retained for command-line/tests. The long-lived Run
+// uses the continuous scheduler, so this finite helper is never a batch barrier.
 func (e *Engine) runManual(ctx context.Context, id string) {
 	e.ManualQueued.Store(false)
 	e.ManualBusy.Store(true)
@@ -59,7 +127,8 @@ func (e *Engine) runManual(ctx context.Context, id string) {
 	if queued := e.Store.State.Manual; queued != nil && queued.ID == id && queued.Status == "queued" {
 		run.RequestedAt = queued.RequestedAt
 	}
-	for _, t := range e.targetsLocked() {
+	targets := append([]Target(nil), e.targetsLocked()...)
+	for _, t := range targets {
 		if t.Enabled {
 			run.Total++
 		}
@@ -75,52 +144,17 @@ func (e *Engine) runManual(ctx context.Context, id string) {
 	}
 	e.publishLocked("")
 	e.stateMu.Unlock()
-	batchErr := e.runTargets(ctx, time.Now().UTC(), e.ManagedTargets(), true, func(t Target) {
+	batchErr := e.runTargets(ctx, time.Now().UTC(), targets, true, func(t Target) {
 		e.stateMu.Lock()
 		defer e.stateMu.Unlock()
-		run.CurrentIDs = append(run.CurrentIDs, t.AccountID)
-		sort.Slice(run.CurrentIDs, func(i, j int) bool { return run.CurrentIDs[i] < run.CurrentIDs[j] })
-		run.CurrentID = run.CurrentIDs[0]
-		e.publishLocked("")
+		e.manualStartedLocked(run, t.AccountID)
 	}, func(t Target, err error) {
 		e.stateMu.Lock()
 		defer e.stateMu.Unlock()
-		for i, id := range run.CurrentIDs {
-			if id == t.AccountID {
-				run.CurrentIDs = append(run.CurrentIDs[:i], run.CurrentIDs[i+1:]...)
-				break
-			}
-		}
-		run.CurrentID = 0
-		if len(run.CurrentIDs) > 0 {
-			run.CurrentID = run.CurrentIDs[0]
-		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || run.Status == "interrupted" {
 			return
 		}
-		run.Completed++
-		r := e.Store.State.Records[t.AccountID]
-		if err != nil || r == nil {
-			run.Errors++
-		} else {
-			switch r.Status {
-			case "unavailable", "skipped", "unsupported", "blocked", "external_change", "pause_uncertain":
-				run.Errors++
-			case "paused_observation":
-				if r.Analysis == nil || r.Analysis.Decision == "indeterminate" {
-					run.Errors++
-				}
-			}
-		}
-		if r == nil || r.Status == "skipped" || r.Status == "unsupported" || r.Status == "external_change" || r.Status == "pause_uncertain" {
-			run.Skipped++
-		} else if err != nil || r.Analysis == nil || r.CheckedAt.Before(run.StartedAt) || r.Analysis.Decision == "indeterminate" {
-			run.Unavailable++
-		} else if r.Analysis.Decision == "match" {
-			run.Passed++
-		} else {
-			run.Mismatches++
-		}
+		e.manualResultLocked(run, t, err)
 		if saveErr := e.save(); saveErr != nil {
 			run.Status = "failed"
 			run.Message = saveErr.Error()
@@ -134,31 +168,8 @@ func (e *Engine) runManual(ctx context.Context, id string) {
 	})
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
-	run.CurrentID = 0
-	run.CurrentIDs = nil
-	run.FinishedAt = time.Now().UTC()
 	if batchErr != nil && ctx.Err() == nil && run.Errors == 0 {
 		run.Errors++
 	}
-	if run.Status != "failed" {
-		run.Status = "completed"
-		run.Message = fmt.Sprintf("通过 %d · 不符 %d · 不可用 %d · 跳过 %d", run.Passed, run.Mismatches, run.Unavailable, run.Skipped)
-		if run.Errors > 0 {
-			run.Status = "completed_with_errors"
-		}
-		if ctx.Err() != nil {
-			run.Status = "interrupted"
-			run.Message = "检测已中断，可重新发起"
-		}
-	}
-	if err := e.save(); err != nil {
-		run.Status = "failed"
-		run.Message = err.Error()
-	}
-	if run.Status == "failed" {
-		e.publishLocked(run.Message)
-	} else {
-		// Completion statistics belong to manual.message, never last_error.
-		e.publishLocked("")
-	}
+	e.finishManualLocked(run, ctx.Err() != nil || run.Status == "interrupted")
 }

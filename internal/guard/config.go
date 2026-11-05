@@ -20,25 +20,28 @@ type Target struct {
 	Enabled   bool   `json:"enabled"`
 }
 type Config struct {
-	GroupIDs          []int64  `json:"group_ids,omitempty"`
-	GroupModel        string   `json:"group_model,omitempty"`
-	GroupExpected     string   `json:"group_expected,omitempty"`
-	Concurrency       int      `json:"concurrency"`
-	TestKey           string   `json:"test_key,omitempty"`
-	ManualRequestID   string   `json:"manual_request_id,omitempty"`
-	Enabled           bool     `json:"enabled"`
-	AutoPause         bool     `json:"auto_pause"`
-	AutoRecover       bool     `json:"auto_recover"`
-	PauseUnavailable  bool     `json:"pause_unavailable"`
-	AdminURL          string   `json:"admin_url"`
-	AdminKey          string   `json:"admin_key"`
-	DataDir           string   `json:"data_dir"`
-	NormalSeconds     int      `json:"normal_seconds"`
-	RetrySeconds      int      `json:"retry_seconds"`
-	QuarantineSeconds int      `json:"quarantine_seconds"`
-	TimeoutSeconds    int      `json:"timeout_seconds"`
-	DailyRequests     int      `json:"daily_requests"`
-	Targets           []Target `json:"targets"`
+	GroupIDs               []int64  `json:"group_ids,omitempty"`
+	GroupModel             string   `json:"group_model,omitempty"`
+	GroupExpected          string   `json:"group_expected,omitempty"`
+	Concurrency            int      `json:"concurrency"`
+	TestKey                string   `json:"test_key,omitempty"`
+	ManualRequestID        string   `json:"manual_request_id,omitempty"`
+	StopRequestID          string   `json:"stop_request_id,omitempty"`
+	RecoverySpacingSeconds int      `json:"recovery_spacing_seconds"`
+	FamilyMatch            bool     `json:"family_match"`
+	Enabled                bool     `json:"enabled"`
+	AutoPause              bool     `json:"auto_pause"`
+	AutoRecover            bool     `json:"auto_recover"`
+	PauseUnavailable       bool     `json:"pause_unavailable"`
+	AdminURL               string   `json:"admin_url"`
+	AdminKey               string   `json:"admin_key"`
+	DataDir                string   `json:"data_dir"`
+	NormalSeconds          int      `json:"normal_seconds"`
+	RetrySeconds           int      `json:"retry_seconds"`
+	QuarantineSeconds      int      `json:"quarantine_seconds"`
+	TimeoutSeconds         int      `json:"timeout_seconds"`
+	DailyRequests          int      `json:"daily_requests"`
+	Targets                []Target `json:"targets"`
 }
 
 func DefaultConfig() Config {
@@ -78,7 +81,10 @@ func ParseConfig(raw []byte, detector *fingerprint.Detector) (Config, error) {
 	if c.NormalSeconds < 300 || c.NormalSeconds > 86400 || c.RetrySeconds < 60 || c.RetrySeconds > 86400 || c.QuarantineSeconds < 300 || c.QuarantineSeconds > 604800 || c.TimeoutSeconds < 10 || c.TimeoutSeconds > 600 || c.DailyRequests < 3 || c.DailyRequests > 10000 {
 		return c, errors.New("检测间隔、超时或每日请求预算超出允许范围")
 	}
-	if len(c.ManualRequestID) > 64 {
+	if c.RecoverySpacingSeconds < 0 || c.RecoverySpacingSeconds > 604800 {
+		return c, errors.New("恢复确认间隔必须为 0 到 604800 秒")
+	}
+	if len(c.ManualRequestID) > 64 || len(c.StopRequestID) > 64 {
 		return c, errors.New("检测请求标识过长")
 	}
 	if len(c.Targets) > 100 {

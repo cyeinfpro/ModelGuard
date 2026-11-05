@@ -31,7 +31,7 @@ func TestSampleAuditExcludesPayloadAndRecordsProgress(t *testing.T) {
 	if strings.Contains(string(raw), "PRIVATE_") {
 		t.Fatal("sample contents leaked")
 	}
-	if len(e.Store.State.Events) != 2 || e.activeSample != nil {
+	if len(e.Store.State.ActivityEvents) != 2 || len(e.Store.State.AuditEvents) != 0 || len(e.activeSamples) != 0 {
 		t.Fatal("missing sample audit or stale progress")
 	}
 }

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +30,7 @@ func decodeFlowStatus(t *testing.T, raw string) map[string]any {
 
 func TestConnectionStatusIndependentOfMonitoringAndNeverLeaksKey(t *testing.T) {
 	_, p := grpcFixture(t)
+	defer p.Close()
 	p.config.AdminKey = "private-management-key"
 	p.accounts = []guard.AccountOption{{ID: 1}}
 	p.accountsUpdated = time.Now().UTC()
@@ -54,9 +57,9 @@ func TestConnectionStatusIndependentOfMonitoringAndNeverLeaksKey(t *testing.T) {
 	}
 }
 
-func TestBridgeReadinessRequiresSocketAndPrivateTokenButDoesNotClaimConnectivity(t *testing.T) {
+func TestBridgeReadinessRequiresLiveHealthzAndPrivateToken(t *testing.T) {
 	// AF_UNIX paths are limited on macOS; the runtime's default temp root may already exceed that limit.
-	dir, err := os.MkdirTemp(".", ".mg-")
+	dir, err := os.MkdirTemp("/tmp", "mg-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,10 +76,32 @@ func TestBridgeReadinessRequiresSocketAndPrivateTokenButDoesNotClaimConnectivity
 	}
 	os.Remove(socket)
 	listener, err := net.Listen("unix", socket)
+	if errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Skip("this filesystem does not support Unix sockets")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	var online atomic.Bool
+	online.Store(true)
+	server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("X-Bridge-Token") != "test-only-token" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if !online.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
 	if got := inspectBridge(dir); got.State != "incomplete" {
 		t.Fatal("missing token passed", got)
 	}
@@ -86,6 +111,17 @@ func TestBridgeReadinessRequiresSocketAndPrivateTokenButDoesNotClaimConnectivity
 	}
 	if got := inspectBridge(dir); got.State != "installed" || !strings.Contains(got.Message, "将在检测时验证") {
 		t.Fatal(got)
+	}
+	online.Store(false)
+	if got := inspectBridge(dir); got.State != "incompatible" {
+		t.Fatal("unhealthy service accepted", got)
+	}
+	online.Store(true)
+	if err := os.WriteFile(token, []byte("wrong-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := inspectBridge(dir); got.State != "unauthorized" {
+		t.Fatal("incorrect token accepted", got)
 	}
 	if err := os.Chmod(token, 0644); err != nil {
 		t.Fatal(err)
@@ -130,6 +166,7 @@ func TestManualCommandSurvivesMismatchedDiagnosticAndTemporaryQueueRejection(t *
 	}))
 	defer s.Close()
 	_, p := grpcFixture(t)
+	defer p.Close()
 	c := guard.DefaultConfig()
 	c.AdminURL, c.AdminKey, c.DataDir = s.URL, "test-key", t.TempDir()
 	c.Targets = []guard.Target{{AccountID: 1, Model: "gpt-6.1-terra", Expected: "gpt-6.1-terra", Enabled: true}}
@@ -201,6 +238,7 @@ func TestOlderDiscoveryCompletionCannotOverwriteNewerResult(t *testing.T) {
 	}))
 	defer s.Close()
 	_, p := grpcFixture(t)
+	defer p.Close()
 	c := guard.DefaultConfig()
 	c.AdminURL, c.AdminKey = s.URL, "key"
 	p.config = c
@@ -229,6 +267,7 @@ func TestCancelledDiscoveryDoesNotReplaceLastKnownConnectionWithShutdownError(t 
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done() }))
 	defer s.Close()
 	_, p := grpcFixture(t)
+	defer p.Close()
 	c := guard.DefaultConfig()
 	c.AdminURL, c.AdminKey = s.URL, "key"
 	p.config = c
@@ -255,6 +294,7 @@ func TestSavedConnectionRejectsStaleDiagnosticConfiguration(t *testing.T) {
 	}))
 	defer s.Close()
 	_, p := grpcFixture(t)
+	defer p.Close()
 	c := guard.DefaultConfig()
 	c.AdminURL, c.AdminKey, c.DataDir = s.URL, "saved-key", t.TempDir()
 	raw, _ := json.Marshal(c)
@@ -288,6 +328,7 @@ func TestRemovingAllTargetsKeepsExistingOwnedHoldVisible(t *testing.T) {
 	}
 	store.Close()
 	_, p := grpcFixture(t)
+	defer p.Close()
 	raw, _ := json.Marshal(c)
 	applied, _ := p.ApplyConfig(context.Background(), &v1.ApplyConfigRequest{ConfigJson: raw})
 	if !applied.Applied || p.engine == nil {
@@ -305,6 +346,7 @@ func TestFailedConnectionDiagnosticIncludesStructuredFailure(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
 	defer s.Close()
 	_, p := grpcFixture(t)
+	defer p.Close()
 	c := guard.DefaultConfig()
 	c.AdminURL, c.AdminKey = s.URL, "invalid-test-key"
 	raw, _ := json.Marshal(c)
@@ -324,6 +366,7 @@ func TestFailedConfigRestartRestoresPendingManualCommand(t *testing.T) {
 	}))
 	defer s.Close()
 	_, p := grpcFixture(t)
+	defer p.Close()
 	c := guard.DefaultConfig()
 	c.AdminURL, c.AdminKey, c.DataDir = s.URL, "test-key", t.TempDir()
 	c.Targets = []guard.Target{{AccountID: 1, Model: "gpt-6.1-terra", Expected: "gpt-6.1-terra", Enabled: true}}

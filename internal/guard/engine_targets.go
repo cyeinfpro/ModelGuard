@@ -48,10 +48,13 @@ func (e *Engine) UpdateManagedTargets(targets []Target) error {
 			return errors.New("分组成员 ID 无效")
 		}
 	}
-	e.controlMu.Lock()
-	defer e.controlMu.Unlock()
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
+	defer e.wakeScheduler()
+	return e.updateManagedTargetsLocked(next)
+}
+
+func (e *Engine) updateManagedTargetsLocked(next []Target) error {
 	if e.stopped.Load() {
 		return errors.New("监测已停止")
 	}
@@ -71,12 +74,12 @@ func (e *Engine) UpdateManagedTargets(targets []Target) error {
 	}
 	for id, t := range old {
 		if n, ok := current[id]; !ok || n != t {
-			e.targetGenerations[id]++
+			e.invalidateTargetLocked(id)
 		}
 	}
 	for id := range current {
 		if _, ok := old[id]; !ok {
-			e.targetGenerations[id]++
+			e.invalidateTargetLocked(id)
 		}
 	}
 	e.managedTargets = next
@@ -116,6 +119,9 @@ func (e *Engine) UpdateManagedTargets(targets []Target) error {
 func TargetsForGroups(c Config, accounts []AccountOption) ([]Target, []int64, error) {
 	groups := map[int64]bool{}
 	for _, id := range c.GroupIDs {
+		if id <= 0 || groups[id] {
+			return nil, nil, errors.New("分组 ID 必须为唯一正整数")
+		}
 		groups[id] = true
 	}
 	existing := map[int64]Target{}
@@ -124,7 +130,12 @@ func TargetsForGroups(c Config, accounts []AccountOption) ([]Target, []int64, er
 	}
 	targets := []Target{}
 	pending := []int64{}
+	seenAccounts := map[int64]bool{}
 	for _, a := range accounts {
+		if a.ID <= 0 || seenAccounts[a.ID] {
+			return nil, nil, errors.New("账号列表包含无效或重复 ID；保留原监测目标")
+		}
+		seenAccounts[a.ID] = true
 		if a.GroupIDs == nil {
 			return nil, nil, errors.New("账号分组元数据缺失；保留原监测目标")
 		}
@@ -159,8 +170,6 @@ func TargetsForGroups(c Config, accounts []AccountOption) ([]Target, []int64, er
 // SetGroupSyncBlocked retains membership/history but invalidates every in-flight
 // round when its membership can no longer be verified. Same lock order as control.
 func (e *Engine) SetGroupSyncBlocked(blocked bool) {
-	e.controlMu.Lock()
-	defer e.controlMu.Unlock()
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 	if len(e.Config.GroupIDs) == 0 || e.stopped.Load() {
@@ -178,7 +187,7 @@ func (e *Engine) SetGroupSyncBlocked(blocked bool) {
 	}
 	changed := false
 	for _, t := range e.targetsLocked() {
-		e.targetGenerations[t.AccountID]++
+		e.invalidateTargetLocked(t.AccountID)
 		if r := e.Store.State.Records[t.AccountID]; r != nil && r.RecoveryPasses != 0 {
 			r.RecoveryPasses = 0
 			changed = true
@@ -205,6 +214,7 @@ func (e *Engine) resumeGroupSyncLocked() error {
 		}
 	}
 	e.groupSyncBlocked = false
+	e.wakeScheduler()
 	e.publishLocked("")
 	return nil
 }
