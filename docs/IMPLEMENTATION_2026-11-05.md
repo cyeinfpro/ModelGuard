@@ -8,7 +8,7 @@
 
 目标版本：**v0.4.0**
 
-本文逐项记录原建议 §2.1–§6.4 的实施、兼容选择与验证证据。当前记录覆盖源码和专项合成验证；最终提交、标签、完整构建、远端 CI、Release 和 VPS 更新回执在文末单独补充，不能从“已实现”推断“已上线”。
+本文逐项记录原建议 §2.1–§6.4 的实施、兼容选择与验证证据。源码、本地完整验证、远端 CI、正式 Release 与 VPS 更新均已完成；具体回执见第四节，合成基准与线上验证的范围分别记录。
 
 ## 一、逐项实施矩阵
 
@@ -48,7 +48,7 @@
 
 | 原建议 | 实施结果与行为 | 主要依据 |
 | --- | --- | --- |
-| §5.1 桥接最小权限 | 默认 direct 模式，通过 psycopg 直接连接 PostgreSQL；交付专用只读角色和投影视图 SQL，只投影 OpenAI API Key 独立账号及必需代理字段，不读取整份 credentials。角色无基础表授权，连接设只读和超时，进程可按与插件相同的非 root UID/GID 运行。交付加固 systemd 和非 root 伴随容器方案。带本地令牌的 /healthz 只验证在线，不触碰账号、数据库或模型。旧 docker 模式仅显式兼容，默认不降级；生产角色和服务的实际迁移结果待部署回执。 | `scripts/api-credential-bridge.py`、`api-bridge-readonly.sql`、`api-bridge.Dockerfile`、`modelguard-api-bridge.service`、[API-BRIDGE.md](API-BRIDGE.md) |
+| §5.1 桥接最小权限 | 默认 direct 模式，通过 psycopg 直接连接 PostgreSQL；交付专用只读角色和投影视图 SQL，只投影 OpenAI API Key 独立账号及必需代理字段，不读取整份 credentials。角色无基础表授权，连接设只读和超时，进程可按与插件相同的非 root UID/GID 运行。交付加固 systemd 和非 root 伴随容器方案。带本地令牌的 /healthz 只验证在线，不触碰账号、数据库或模型。旧 docker 模式仅显式兼容，默认不降级；VPS 已采用同版源码的非 root 容器与专用只读角色，实际权限和鉴权健康校验通过，见第四节。 | `scripts/api-credential-bridge.py`、`api-bridge-readonly.sql`、`api-bridge.Dockerfile`、`modelguard-api-bridge.service`、[API-BRIDGE.md](API-BRIDGE.md) |
 | §5.2 回环地址一致性 | Go 桥接读取、运行时就绪判断和 Python 服务统一接受合法回环主机及任意有效端口，包括 localhost、IPv4 回环、IPv6 ::1；拒绝路径、用户信息、查询、跳转和非回环桥接地址。8080 仍是示例默认值，不再是可用性的硬编码门槛。 | `internal/guard/api_bridge.go`、`internal/runtime/status.go`、`scripts/api-credential-bridge.py` |
 | §5.3 postMessage 与生命周期 | 优先固定 ancestorOrigins、宿主下发 parent_origin 或 referrer 中的有效父页面源，收信同时核验 parent、Bridge Token 和源。旧宿主缺少源信息时保留初始通配兼容，并在有效回执后绑定源。用 pagehide 清理挂起请求和轮询；保留沙箱内经典脚本兼容性。 | `ui/bridge.js`、`ui/app.js`、`tests/ui.optimization.test.mjs` |
 
@@ -58,8 +58,8 @@
 | --- | --- | --- |
 | §6.1 单一来源 | VERSION 驱动生成运行版本、package.json/lock 与 README 标记。内嵌 plugin.json 统一打包和运行元数据；defaults.json 集中推荐模型及别名，发现接口/Health 下发给 UI。增加一致性检查；打包排序改用标准排序。 | `internal/metadata/*`、`scripts/sync-metadata.py`、`cmd/package/main.go`、`tests/metadata.test.mjs` |
 | §6.2 前端拆分 | 拆为 bridge、state、accounts、monitor、flow、app 六个经典脚本，HTML 显式顺序加载；不引入依赖沙箱模块跨源行为的 module 方案。保留共享宿主通信、草稿及接入流程约定。 | `ui/*.js`、`ui/index.html`、`tests/ui-fixture.mjs` |
-| §6.3 测试与 CI | Unix socket 测试迁到 /tmp 短路径，仅明确报告不支持 socket 时跳过，权限/逻辑错误继续失败。新增配置、数字解析、SSE、分组模糊测试；热发布/冷快照/存储基准；100 目标×并发 8 合成场景及预算、重试、调度、停止、代际、存储恢复回归。CI 增加版本一致性、staticcheck、govulncheck、ruff、Go 缓存和基准产物；新增门禁的远端成功状态由发布阶段填写。 | `internal/*/*_test.go`、`tests/*`、`.github/workflows/ci.yml` |
-| §6.4 工作区卫生 | 已在项目持久设置 `git config core.fileMode false`；实施前复查确认内容与基线一致，仅原优化文档未跟踪。不把文件系统产生的 100644→100755 漂移纳入功能差异。保留既有忽略规则，打包使用明确清单；最终 diff、暂存范围与工作树状态由发布门禁核验。 | `.gitignore`、`cmd/package/main.go`、Git 内容差异与发布检查 |
+| §6.3 测试与 CI | Unix socket 测试迁到 /tmp 短路径，仅明确报告不支持 socket 时跳过，权限/逻辑错误继续失败。新增配置、数字解析、SSE、分组模糊测试；热发布/冷快照/存储基准；100 目标×并发 8 合成场景及预算、重试、调度、停止、代际、存储恢复回归。CI 增加版本一致性、staticcheck、govulncheck、ruff、Go 缓存和基准产物；main 与 v0.4.0 标签的远端验证均已通过，基准作为 CI 产物保存。 | `internal/*/*_test.go`、`tests/*`、`.github/workflows/ci.yml` |
+| §6.4 工作区卫生 | 已在项目持久设置 `git config core.fileMode false`；实施前复查确认内容与基线一致，仅原优化文档未跟踪。不把文件系统产生的 100644→100755 漂移纳入功能差异。保留既有忽略规则，打包使用明确清单；最终内容 diff、暂存范围和空白检查已通过；发布提交时工作树干净。 | `.gitignore`、`cmd/package/main.go`、Git 内容差异与发布检查 |
 
 ## 二、策略与兼容决定
 
@@ -89,7 +89,7 @@
 
 Health 继续返回完整账号列表，维护 Sub2API UI Bridge v1 兼容；收益来自预编码、修订号和增量 UI，并非已实施分页/条件获取。宿主按 ID 查询账号和原子条件改调度仍属于宿主侧能力扩展。
 
-/healthz 成功只表示本机服务响应且令牌匹配；数据库只读权限、管理员账号授权、上游采样是不同层次。只读角色和非 root 服务模板已经交付，VPS 是否实际采用这些配置以部署记录为准。完整迁移步骤与回退入口见 [API-BRIDGE.md](API-BRIDGE.md)。
+/healthz 成功只表示本机服务响应且令牌匹配；数据库只读权限、管理员账号授权、上游采样是不同层次。只读角色和非 root 服务模板已经交付，VPS 已采用 direct 模式和 UID/GID 1000 的伴随容器；实际部署验证见第四节。完整迁移步骤与回退入口见 [API-BRIDGE.md](API-BRIDGE.md)。
 
 ## 三、已完成的专项验证
 
@@ -151,14 +151,28 @@ go test ./internal/guard -run '^$' -bench 'Benchmark(Publish|Snapshot|Store)' -b
 
 这一组数据来自最终安全依赖升级后的版本组合。Health 使用缓存片段组包，同时保留完整 accounts 响应，因此账号增多仍会增加输出字节的分配和拷贝成本。上面的 Guard 基准是实现阶段的专项记录；两组数据用于各自的成本分析，不跨工具链或不同基准口径计算提速倍数。
 
-## 四、最终发布与 VPS 回执（由发布阶段补充）
+## 四、最终发布与 VPS 回执
 
 | 门禁 | 状态/证据 |
 | --- | --- |
 | 全量 make test、静态分析和依赖漏洞检查 | 最终 Go 1.26.10 / 安全依赖组合下 `make test` 通过：全包 `-race`、go vet、Node 51/51、Python 19/19，均无跳过。staticcheck v0.8.2、ruff 0.17.3（E4/E9/F）、元数据一致性检查通过；govulncheck v1.9.0 无已知漏洞。 |
 | Linux amd64/arm64 构建、真实插件握手及包校验 | `make check-package`、`make package`、`make verify-package` 全部通过；本机真实插件握手、配置、Health 与 0.4.0 版本匹配。25 个有效负载文件哈希通过；无签名/测试签名包均验证成功，篡改、缺失、多余文件、错误签名及无效显式密钥均按预期拒绝。 |
-| 提交 SHA、分支、v0.4.0 标签及推送 | 待补充最终回执 |
-| 远端 CI 与 GitHub Release 资产校验和 | 待补充最终回执 |
-| VPS 插件版本、进程健康、配置/灰度恢复 | 待补充最终回执 |
-| VPS 桥接只读角色、非 root 进程和 /healthz | 待补充最终回执 |
-| 回退备份位置与最终工作树状态 | 待补充最终回执 |
+| 提交 SHA、分支、v0.4.0 标签及推送 | [2b6e717a04c106b898206e8db7f914c059d9314f](https://github.com/cyeinfpro/ModelGuard/commit/2b6e717a04c106b898206e8db7f914c059d9314f) 已原子推送 main 和 v0.4.0 注解标签，远端 peeled tag 与提交一致。上线回执随后以独立文档提交归档，不移动发布标签。 |
+| 远端 CI 与 GitHub Release 资产校验和 | [标签 CI 41959980191](https://github.com/cyeinfpro/ModelGuard/actions/runs/41959980191) 与 [main CI 41959980186](https://github.com/cyeinfpro/ModelGuard/actions/runs/41959980186) 均 success。[v0.4.0 正式 Release](https://github.com/cyeinfpro/ModelGuard/releases/tag/v0.4.0) 于 2026-11-05 03:16:12 UTC 发布，包含插件包和 SHA256SUMS；VPS 下载字节、GitHub 资产 digest 与校验文件一致。 |
+| VPS 插件版本、进程健康、配置/灰度恢复 | 已从 0.3.2 更新至 0.4.0，enabled / runtime_healthy=true。配置摘要升级前后相同，管理目标、自动处理开关与灰度保留；上传后启动前 state.json 字节未改变。账号发现正常，family_match=false、recovery_spacing_seconds=0。宿主核心二进制和主容器 ID 保持一致。 |
+| VPS 桥接只读角色、非 root 进程和 /healthz | 同网络命名空间、UID/GID 1000 和 pgpass 的真实数据库预检通过：视图可读、基础账号/代理表无 SELECT/UPDATE 权限。正式 Compose 伴随容器为 1000:1000、只读根文件系统、cap_drop=ALL、no-new-privileges，无 Docker Socket；鉴权 /healthz 返回 200，api_bridge_ready=true。旧 root 桥服务已 inactive / disabled。 |
+| 回退备份位置与最终工作树状态 | VPS 部署目录下 `backups/modelguard-040-20261105T031820Z/` 保存旧插件包、Compose、旧桥脚本/服务、插件数据库表与状态备份，以及 verification.json / post-deploy-verification.json。代码发布提交时工作树干净；本次回执文档经独立提交归档，发布标签保持不变。 |
+
+### 正式安装包与部署验收边界
+
+正式包大小：18,381,023 bytes。VPS 实际下载并核验的 SHA-256：
+
+```text
+d3662b3b01eb51ec3a660d4a47fabd1968fa10d5c8b14a67b3af60f5be7b822f  ModelGuard-0.4.0.s2plugin
+```
+
+标签 CI 首次发布任务在创建草稿后未能立即读回该草稿；确认现有草稿和标签一致后，仅重试失败的 publish job，第二次成功。验证通过的产物、代码提交和原标签均保持不变，未覆盖不同内容的同名资产。
+
+升级脚本在切换前完成互斥、配置与 Compose 并发检查、只读数据库预检和备份。恢复路径另经 9 项纯 mock 故障注入验证，覆盖响应丢失、切换中断、清理失败及并发编辑；最终实机切换成功，未触发回滚。已复核安装版本、健康、配置摘要、账号发现、桥接权限与鉴权，以及宿主容器和核心二进制保持一致。
+
+线上验收覆盖控制面、发现与凭据桥接链路；模型评分、并发和故障处理的验证来自前述合成测试。现有定时策略随插件启用恢复，生产模型结果以其后实际巡检为准。公开回执不包含主机地址、管理密钥、桥接令牌或账号明细。
