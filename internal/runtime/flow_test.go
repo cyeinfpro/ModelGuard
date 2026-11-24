@@ -57,7 +57,7 @@ func TestConnectionStatusIndependentOfMonitoringAndNeverLeaksKey(t *testing.T) {
 	}
 }
 
-func TestBridgeReadinessRequiresLiveHealthzAndPrivateToken(t *testing.T) {
+func TestBridgeReadinessRequiresDependenciesAndPrivateToken(t *testing.T) {
 	// AF_UNIX paths are limited on macOS; the runtime's default temp root may already exceed that limit.
 	dir, err := os.MkdirTemp("/tmp", "mg-")
 	if err != nil {
@@ -83,14 +83,20 @@ func TestBridgeReadinessRequiresLiveHealthzAndPrivateToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	var online atomic.Bool
+	var checking atomic.Bool
 	online.Store(true)
 	server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" || r.Method != http.MethodGet {
+		if r.URL.Path != "/readyz" || r.Method != http.MethodGet {
 			http.NotFound(w, r)
 			return
 		}
 		if r.Header.Get("X-Bridge-Token") != "test-only-token" {
 			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if checking.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"ok":false,"code":"checking"}`))
 			return
 		}
 		if !online.Load() {
@@ -112,8 +118,13 @@ func TestBridgeReadinessRequiresLiveHealthzAndPrivateToken(t *testing.T) {
 	if got := inspectBridge(dir); got.State != "installed" || !strings.Contains(got.Message, "将在检测时验证") {
 		t.Fatal(got)
 	}
+	checking.Store(true)
+	if got := inspectBridge(dir); got.State != "checking" {
+		t.Fatal("pending dependency check was treated as offline", got)
+	}
+	checking.Store(false)
 	online.Store(false)
-	if got := inspectBridge(dir); got.State != "incompatible" {
+	if got := inspectBridge(dir); got.State != "dependency_unavailable" {
 		t.Fatal("unhealthy service accepted", got)
 	}
 	online.Store(true)

@@ -12,6 +12,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -210,6 +211,111 @@ class BridgeTests(unittest.TestCase):
             self.assertIn(b"Cache-Control: no-store", head)
             read.assert_not_called()
             database.assert_not_called()
+
+    def test_readyz_authenticates_and_redacts_dependency_failures(self):
+        with patch.object(bridge.ReadinessProbe, "status",
+                          return_value={"ok": False, "code": "admin_unreachable"}) as probe, \
+             self.running_bridge() as path:
+            self.assertEqual(self.request(path, endpoint="/readyz", admin_key=None)[0], 403)
+            probe.assert_not_called()
+            status, head, body = self.request(path, self.config.token, "/readyz", None)
+            self.assertEqual(status, 503)
+            self.assertEqual(body, {"ok": False, "code": "admin_unreachable"})
+            self.assertIn(b"Cache-Control: no-store", head)
+
+    def test_readyz_success(self):
+        with patch.object(bridge.ReadinessProbe, "status", return_value={"ok": True}), \
+             self.running_bridge() as path:
+            self.assertEqual(self.request(path, self.config.token, "/readyz", None)[0], 200)
+
+    def test_readiness_checks_management_before_database_without_secrets(self):
+        with patch.object(bridge.ADMIN_HTTP, "open", side_effect=OSError("secret")), \
+             patch.object(bridge, "database_pool") as pool:
+            self.assertEqual(bridge.dependency_status(self.config),
+                             {"ok": False, "code": "admin_unreachable"})
+            pool.assert_not_called()
+
+    def test_readiness_uses_empty_readonly_projection_and_redacts_database_error(self):
+        queries = []
+        class Connection:
+            def execute(self, sql):
+                queries.append(sql)
+                return contextlib.nullcontext(None)
+        pool = types.SimpleNamespace(connection=lambda: contextlib.nullcontext(Connection()))
+        response = types.SimpleNamespace(status=200)
+        with patch.object(bridge.ADMIN_HTTP, "open",
+                          return_value=contextlib.nullcontext(response)) as admin, \
+             patch.object(bridge, "database_pool", return_value=pool), \
+             patch.object(bridge, "database_account") as account:
+            self.assertEqual(bridge.dependency_status(self.config), {"ok": True})
+            self.assertEqual(queries, ["SELECT 1 FROM public.modelguard_bridge_accounts LIMIT 0"])
+            self.assertEqual(admin.call_args.args, (self.config.admin_url + "/health",))
+            account.assert_not_called()
+        with patch.object(bridge.ADMIN_HTTP, "open", return_value=contextlib.nullcontext(response)), \
+             patch.object(bridge, "database_pool", side_effect=RuntimeError("password")):
+            self.assertEqual(bridge.dependency_status(self.config),
+                             {"ok": False, "code": "database_unavailable"})
+
+
+    def test_slow_dependencies_return_checking_without_blocking_http(self):
+        entered, release = threading.Event(), threading.Event()
+        def slow(_):
+            entered.set()
+            release.wait(2)
+            return {"ok": True}
+        with patch.object(bridge, "dependency_status", side_effect=slow) as check, self.running_bridge() as path:
+            try:
+                start = time.monotonic()
+                status, _, body = self.request(path, self.config.token, "/readyz", None)
+                self.assertLess(time.monotonic() - start, 0.7)
+                self.assertEqual((status, body), (503, {"ok": False, "code": "checking"}))
+                self.assertTrue(entered.wait(1))
+                for _ in range(10):
+                    self.assertEqual(self.request(path, self.config.token, "/readyz", None)[2]["code"], "checking")
+                self.assertEqual(check.call_count, 1)
+                release.set()
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    status, _, body = self.request(path, self.config.token, "/readyz", None)
+                    if status == 200:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual((status, body), (200, {"ok": True}))
+            finally:
+                release.set()
+
+    def test_readiness_cache_refreshes_single_flight_and_expires_stale_success(self):
+        now = [100.0]
+        entered, release = threading.Event(), threading.Event()
+        probe = bridge.ReadinessProbe(self.config, clock=lambda: now[0])
+        probe.value, probe.checked_at = {"ok": True}, 100.0
+        def slow(_):
+            entered.set()
+            release.wait(2)
+            return {"ok": False, "code": "admin_unreachable"}
+        with patch.object(bridge, "dependency_status", side_effect=slow) as check:
+            try:
+                self.assertEqual(probe.status(), {"ok": True})
+                check.assert_not_called()
+                now[0] = 106.0
+                self.assertEqual(probe.status(), {"ok": True})
+                self.assertTrue(entered.wait(1))
+                for _ in range(30):
+                    self.assertEqual(probe.status(), {"ok": True})
+                self.assertEqual(check.call_count, 1)
+                now[0] = 131.0
+                self.assertEqual(probe.status(), {"ok": False, "code": "checking"})
+                release.set()
+                deadline = time.monotonic() + 2
+                while probe.running and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(probe.status(), {"ok": False, "code": "admin_unreachable"})
+                probe.close()
+                self.assertEqual(probe.status()["code"], "checking")
+                self.assertEqual(check.call_count, 1)
+            finally:
+                release.set()
+                probe.close()
 
     def test_loopback_management_accepts_any_valid_port_and_ipv6(self):
         for url in ("http://127.0.0.1:18443", "http://[::1]:9000",

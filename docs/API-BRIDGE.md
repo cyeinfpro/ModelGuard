@@ -176,3 +176,24 @@ python3 -m unittest discover -s tests -p '*_test.py'
 ```
 
 测试使用 /tmp 短路径、本地假服务和模拟数据库，不访问生产账号，不需要 Docker 或真实凭据。仅在文件系统明确报告不支持 Unix Socket 时跳过相关测试；权限拒绝和逻辑错误仍会失败。
+
+## 宿主重启后的桥接恢复
+
+Compose 中的 `network_mode: service:sub2api` 会把桥接绑定到当前的 Sub2API 网络命名空间。Sub2API 重启后即使容器 ID 不变，也可能换用新的网络命名空间。桥接仍在运行，Unix 套接字仍可访问，但其回环管理地址和数据库 DNS 同时失效。Compose 的 `depends_on.restart: true` 只联动 Compose 管理的操作，Docker 自身的重启和外部升级仍需核验。
+
+在有现有 Docker 运维权限的 Linux 宿主机上，用实际部署目录和完整 Compose 文件运行随包提供的检查工具：
+
+```sh
+python3 scripts/reconcile-api-bridge.py --project-directory /opt/sub2api \
+  -f /opt/sub2api/docker-compose.yml -f /opt/sub2api/compose.override.yml
+```
+
+追加 `--apply` 可自动修复正在运行的桥接。工具比较内核记录的网络命名空间，确认 Compose 的网络配置并复查容器状态后，只重建桥接。该逻辑同时覆盖同 ID 重启和已替换的宿主容器。命名空间一致时零变更，容器停用、缺失或状态变化时检查报错。即使执行重建，也不会拉取镜像、重建 Sub2API 或更改账号。
+
+应用修复的命令可加入宿主升级流程，也可作为宿主的 systemd oneshot 定时运行，例如配置 `OnBootSec=30s` 和 `OnUnitInactiveSec=1min`。长期运行时将脚本安装到固定的宿主路径，保留完整的 Compose 文件参数。桥接容器本身继续以非 root 运行，且无需 Docker 套接字。修复后核对 `/readyz` 和下一次计划检测。
+
+### 存活与就绪
+
+- `/healthz` 检查套接字和桥接进程。插件通过 `/readyz` 检查管理端 `/health` 与已配置的只读数据库视图，两个端点都要求本机桥接令牌。
+- `/readyz` 后台合并依赖检查，缓存 5 秒。首次检查或结果超过 30 秒时报告 `checking`。管理端和数据库故障分别报告 `admin_unreachable` 和 `database_unavailable`。
+- 就绪探测不读取账号行或发送模型请求。单账号仍需通过原有权限检查，采样后才能判断指纹。插件与桥接应一起升级，旧桥接缺少 `/readyz` 时页面会提示更新桥接。

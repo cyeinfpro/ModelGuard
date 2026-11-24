@@ -93,7 +93,7 @@ func main() {
 		must(err)
 		data["runtimes/linux-"+arch+"/account-guard"] = b
 	}
-	for _, name := range []string{"LICENSE", "COPYING", "README.md", "THIRD_PARTY_NOTICES.md", "docs/API-BRIDGE.md", "scripts/api-credential-bridge.py", "scripts/api-bridge-readonly.sql", "scripts/api-bridge.Dockerfile", "scripts/modelguard-api-bridge.service"} {
+	for _, name := range []string{"LICENSE", "COPYING", "README.md", "THIRD_PARTY_NOTICES.md", "docs/API-BRIDGE.md", "scripts/api-credential-bridge.py", "scripts/api-bridge-readonly.sql", "scripts/api-bridge.Dockerfile", "scripts/reconcile-api-bridge.py", "scripts/modelguard-api-bridge.service"} {
 		b, err := os.ReadFile(name)
 		must(err)
 		data[name] = b

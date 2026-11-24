@@ -21,6 +21,7 @@ import socketserver
 import stat
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -258,6 +259,15 @@ ACCOUNT_SQL = """select json_build_object(
     from public.modelguard_bridge_accounts where id=%s"""
 
 
+def docker_query(config: Config, query: str) -> bytes:
+    return subprocess.run(
+        ["docker", "exec", config.db_container, "psql", "-X", "-v",
+         "ON_ERROR_STOP=1", "-U", config.db_user, "-d", config.db_name,
+         "-Atc", query],
+        capture_output=True, timeout=12, check=True,
+    ).stdout
+
+
 def database_account(config: Config, account_id: int) -> dict:
     if type(account_id) is not int or not 0 < account_id < 10 ** 18:
         raise BridgeError(404, "not found")
@@ -265,12 +275,7 @@ def database_account(config: Config, account_id: int) -> dict:
         # Explicit migration fallback only. The default direct mode never starts
         # a subprocess or needs Docker access. The same projected view and
         # configured readonly role are used in either mode.
-        raw = subprocess.run(
-            ["docker", "exec", config.db_container, "psql", "-X", "-v",
-             "ON_ERROR_STOP=1", "-U", config.db_user, "-d", config.db_name,
-             "-Atc", ACCOUNT_SQL.replace("%s", str(account_id))],
-            capture_output=True, timeout=12, check=True,
-        ).stdout
+        raw = docker_query(config, ACCOUNT_SQL.replace("%s", str(account_id)))
         if not raw.strip():
             raise BridgeError(404, "account not found")
         if len(raw) > MAX_RESPONSE_BYTES:
@@ -318,6 +323,65 @@ def read_account(config: Config, account_id: int, key: str) -> dict:
     return account
 
 
+def dependency_status(config: Config) -> dict:
+    """Readiness only: no account rows, admin key or model requests."""
+    try:
+        with ADMIN_HTTP.open(config.admin_url + "/health", timeout=0.4) as response:
+            if response.status != 200:
+                return {"ok": False, "code": "admin_unreachable"}
+    except Exception:
+        return {"ok": False, "code": "admin_unreachable"}
+    query = "SELECT 1 FROM public.modelguard_bridge_accounts LIMIT 0"
+    try:
+        if config.db_mode == "docker":
+            docker_query(config, query)
+        else:
+            with database_pool(config).connection() as connection:
+                with connection.execute(query):
+                    pass
+    except Exception:
+        return {"ok": False, "code": "database_unavailable"}
+    return {"ok": True}
+
+
+class ReadinessProbe:
+    """Single-flight background checks keep HTTP independent of DB timeouts."""
+    def __init__(self, config, ttl=5, max_stale=30, clock=time.monotonic):
+        self.config, self.ttl, self.max_stale, self.clock = config, ttl, max_stale, clock
+        self.lock = threading.Lock()
+        self.value, self.checked_at = None, 0
+        self.running, self.closed = False, False
+
+    def status(self):
+        with self.lock:
+            if self.closed:
+                return {"ok": False, "code": "checking"}
+            age = self.clock() - self.checked_at
+            if not self.running and (self.value is None or age >= self.ttl):
+                self.running = True
+                try:
+                    threading.Thread(target=self._refresh, daemon=True).start()
+                except RuntimeError:
+                    self.running = False
+                    return {"ok": False, "code": "checking"}
+            if self.value is None or age >= self.max_stale:
+                return {"ok": False, "code": "checking"}
+            return dict(self.value)
+
+    def _refresh(self):
+        try:
+            value = dependency_status(self.config)
+        except Exception:
+            value = {"ok": False, "code": "database_unavailable"}
+        with self.lock:
+            self.value, self.checked_at = value, self.clock()
+            self.running = False
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -338,6 +402,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(403, {"error": "bridge authorization required"})
         if self.path == "/healthz":
             return self.reply(200, {"ok": True})
+        if self.path == "/readyz":
+            status = self.server.readiness.status()
+            return self.reply(200 if status["ok"] else 503, status)
         match = ACCOUNT_PATH.fullmatch(self.path)
         if not match:
             return self.reply(404, {"error": "not found"})
@@ -357,6 +424,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.UnixStreamServer):
     def __init__(self, path, config, max_workers=8, max_pending=16):
         self.config = config
+        self.readiness = ReadinessProbe(config)
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self.slots = threading.BoundedSemaphore(max_workers + max_pending)
         try:
@@ -387,6 +455,7 @@ class Server(socketserver.UnixStreamServer):
             self.slots.release()
 
     def server_close(self):
+        self.readiness.close()
         super().server_close()
         self.pool.shutdown(wait=True)
         close_database_pools()

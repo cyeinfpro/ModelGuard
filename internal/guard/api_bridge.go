@@ -43,6 +43,9 @@ func ReadAPIAccount(ctx context.Context, c Config, id int64) (Account, error) {
 		return out, errors.New("API 凭据桥接暂时不可用")
 	}
 	defer r.Body.Close()
+	if r.StatusCode == http.StatusBadGateway || r.StatusCode == http.StatusServiceUnavailable {
+		return out, fmt.Errorf("API 凭据桥接依赖暂时不可用（HTTP %d）；请查看桥接就绪状态", r.StatusCode)
+	}
 	if r.StatusCode != 200 {
 		return out, fmt.Errorf("API 账号授权或桥接读取失败（HTTP %d）", r.StatusCode)
 	}
